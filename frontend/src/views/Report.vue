@@ -1,152 +1,200 @@
 <template>
-  <div class="report-page">
-    <el-card shadow="sm">
-      <template #header>
-        <div class="card-header">
-          <span>📊 统计分析与历史记录</span>
-          <el-button type="success" :icon="Download" @click="exportExcel">导出 Excel</el-button>
-        </div>
-      </template>
-
-      <el-table :data="tableData" v-loading="loading" border stripe style="width: 100%">
-        <el-table-column v-if="role === 'admin'" prop="user_name" label="提交人" width="100" fixed />
+  <div class="report-dashboard">
+    <el-card shadow="sm" class="filter-card" style="margin-bottom: 20px;">
+      <div class="filter-container">
+        <span class="filter-label">🔍 筛选分析：</span>
         
-        <el-table-column v-if="role === 'admin'" prop="region" label="所属区域" width="100" />
-        
-        <el-table-column prop="hospital_name" label="拜访客户" min-width="180" show-overflow-tooltip />
-        <el-table-column prop="contact_person" label="拜访对象" width="120" />
-        
-        <el-table-column label="拜访时间" width="160">
-          <template #default="{ row }">
-            {{ formatDate(row.visit_time_start) }}
-          </template>
-        </el-table-column>
+        <el-select 
+          v-if="role === 'admin'"
+          v-model="selectedRegion" 
+          placeholder="全部大区" 
+          clearable 
+          @change="fetchData"
+          style="width: 140px; margin-right: 15px;"
+        >
+          <el-option v-for="r in regionOptions" :key="r" :label="r" :value="r" />
+        </el-select>
 
-        <el-table-column prop="purpose" label="交流目的" min-width="200" show-overflow-tooltip />
-
-        <el-table-column label="任务类型" min-width="150">
-          <template #default="{ row }">
-            <el-tag 
-              v-for="tag in row.activity_types" 
-              :key="tag" 
-              size="small" 
-              style="margin-right: 4px; margin-bottom: 4px;"
-            >
-              {{ tag }}
-            </el-tag>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="业务机会" min-width="150">
-          <template #default="{ row }">
-            <el-tag 
-              v-for="opp in row.opportunities" 
-              :key="opp" 
-              type="success" 
-              size="small" 
-              style="margin-right: 4px; margin-bottom: 4px;"
-            >
-              {{ opp }}
-            </el-tag>
-          </template>
-        </el-table-column>
-
-        <el-table-column prop="next_step" label="下一步计划" min-width="180" show-overflow-tooltip />
-      </el-table>
-
-      <div class="pagination-container">
-        <el-pagination
-          background
-          layout="total, prev, pager, next, jumper"
-          :total="total"
-          v-model:current-page="currentPage"
-          :page-size="pageSize"
-          @current-change="fetchData"
+        <el-date-picker
+          v-model="dateRange"
+          type="daterange"
+          range-separator="至"
+          start-placeholder="开始日期"
+          end-placeholder="结束日期"
+          value-format="YYYY-MM-DD"
+          @change="fetchData"
+          :shortcuts="shortcuts"
+          style="width: 300px;"
         />
       </div>
     </el-card>
+
+    <el-row :gutter="20" style="margin-bottom: 20px;">
+      <el-col :xs="24" :sm="10">
+        <el-card shadow="hover" header="🌍 各大区工时投入 (基于团队)">
+          <div ref="regionChartRef" style="height: 350px;"></div>
+        </el-card>
+      </el-col>
+      <el-col :xs="24" :sm="14">
+        <el-card shadow="hover" header="🏥 Top 10 客户工时投入">
+          <div ref="hospChartRef" style="height: 350px;"></div>
+        </el-card>
+      </el-col>
+    </el-row>
+
+    <el-row :gutter="20">
+      <el-col :xs="24" :sm="12">
+        <el-card shadow="hover" header="🎯 任务类型工时占比">
+          <div ref="actChartRef" style="height: 350px;"></div>
+        </el-card>
+      </el-col>
+      <el-col :xs="24" :sm="12">
+        <el-card shadow="hover" header="💡 业务机会工时分布">
+          <div ref="oppChartRef" style="height: 350px;"></div>
+        </el-card>
+      </el-col>
+    </el-row>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
-import { Download } from '@element-plus/icons-vue' 
+import { ref, onMounted, onUnmounted, nextTick } from 'vue'
+import * as echarts from 'echarts'
 import request from '../api/request'
 
 const role = ref(localStorage.getItem('role') || 'user')
-const tableData = ref([])
-const loading = ref(false)
-const total = ref(0)
-const currentPage = ref(1)
-const pageSize = 15 // 每页显示 15 条
+const dateRange = ref([])
+const selectedRegion = ref('')
+const regionOptions = ref([])
 
-// 获取数据
+const shortcuts = [
+  { text: '最近一周', value: () => { const end = new Date(); const start = new Date(); start.setTime(start.getTime() - 3600 * 1000 * 24 * 7); return [start, end] } },
+  { text: '最近一月', value: () => { const end = new Date(); const start = new Date(); start.setTime(start.getTime() - 3600 * 1000 * 24 * 30); return [start, end] } },
+  { text: '今年以来', value: () => { const end = new Date(); const start = new Date(new Date().getFullYear(), 0, 1); return [start, end] } }
+]
+
+const regionChartRef = ref(null)
+const hospChartRef = ref(null)
+const actChartRef = ref(null)
+const oppChartRef = ref(null)
+
+let charts = []
+
+// 获取可用的大区列表
+const fetchRegions = async () => {
+  if (role.value === 'admin') {
+    try {
+      regionOptions.value = await request.get('/users/regions')
+    } catch (err) {
+      console.error("获取大区列表失败", err)
+    }
+  }
+}
+
+// 获取图表数据
 const fetchData = async () => {
-  loading.value = true
+  let params = {}
+  if (dateRange.value && dateRange.value.length === 2) {
+    params.start_date = dateRange.value[0]
+    params.end_date = dateRange.value[1]
+  }
+  if (selectedRegion.value) {
+    params.region = selectedRegion.value
+  }
+
   try {
-    const res = await request.get('/logs', {
-      params: { page: currentPage.value, size: pageSize }
-    })
-    tableData.value = res.items
-    total.value = res.total
-  } catch (error) {
-    console.error('获取日志失败:', error)
-  } finally {
-    loading.value = false
+    const data = await request.get('/stats/summary', { params })
+    await nextTick()
+    updateCharts(data)
+  } catch (err) {
+    console.error("获取统计数据失败", err)
   }
 }
 
-// 导出 Excel 方法
-const exportExcel = async () => {
-  try {
-    ElMessage.info('正在生成 Excel 文件，请稍候...')
-    // 注意：文件下载必须设置 responseType 为 blob
-    const res = await request.get('/logs/export', { responseType: 'blob' })
-    const url = window.URL.createObjectURL(new Blob([res]))
-    const link = document.createElement('a')
-    link.href = url
-    link.setAttribute('download', '工时记录导出.xlsx')
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
-    ElMessage.success('导出成功！')
-  } catch (error) {
-    ElMessage.error('导出失败，请重试')
+const updateCharts = (data) => {
+  if (charts.length === 0) {
+    charts = [
+      echarts.init(regionChartRef.value),
+      echarts.init(hospChartRef.value),
+      echarts.init(actChartRef.value),
+      echarts.init(oppChartRef.value)
+    ]
   }
+
+  const [regionChart, hospChart, actChart, oppChart] = charts
+
+  // 1. 区域工时分布 (饼图)
+  regionChart.setOption({
+    tooltip: { trigger: 'item', formatter: '{b}: {c} 小时 ({d}%)' },
+    series: [{
+      type: 'pie', radius: '60%', data: data.region_stats,
+      itemStyle: { borderRadius: 4, borderColor: '#fff', borderWidth: 2 }
+    }]
+  })
+
+  // 2. 客户投入排行 (条形图)
+  hospChart.setOption({
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    grid: { left: '3%', right: '8%', bottom: '3%', containLabel: true },
+    xAxis: { type: 'value', name: '小时' },
+    yAxis: { 
+      type: 'category', 
+      data: data.hospital_stats.names.reverse(),
+      axisLabel: { interval: 0, width: 120, overflow: 'truncate' }
+    },
+    series: [{ 
+      type: 'bar', 
+      data: data.hospital_stats.values.reverse(), 
+      itemStyle: { color: '#409EFF', borderRadius: [0, 4, 4, 0] },
+      label: { show: true, position: 'right' }
+    }]
+  })
+
+  // 3. 任务类型 (环形图)
+  actChart.setOption({
+    tooltip: { trigger: 'item', formatter: '{b}: {c} 小时 ({d}%)' },
+    series: [{
+      type: 'pie', radius: ['40%', '70%'], data: data.activity_stats,
+      itemStyle: { borderRadius: 5, borderColor: '#fff', borderWidth: 2 }
+    }]
+  })
+
+  // 4. 业务机会 (环形图)
+  oppChart.setOption({
+    tooltip: { trigger: 'item', formatter: '{b}: {c} 小时 ({d}%)' },
+    series: [{
+      type: 'pie', radius: ['40%', '70%'], data: data.opportunity_stats,
+      itemStyle: { borderRadius: 5, borderColor: '#fff', borderWidth: 2 }
+    }]
+  })
 }
 
-// 时间格式化工具（只显示到分）
-const formatDate = (dateStr) => {
-  if (!dateStr) return '-'
-  const date = new Date(dateStr)
-  const y = date.getFullYear()
-  const m = String(date.getMonth() + 1).padStart(2, '0')
-  const d = String(date.getDate()).padStart(2, '0')
-  const hh = String(date.getHours()).padStart(2, '0')
-  const mm = String(date.getMinutes()).padStart(2, '0')
-  return `${y}-${m}-${d} ${hh}:${mm}`
-}
+const handleResize = () => charts.forEach(c => c.resize())
 
 onMounted(() => {
+  fetchRegions()
   fetchData()
+  window.addEventListener('resize', handleResize)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', handleResize)
+  charts.forEach(c => c.dispose())
 })
 </script>
 
 <style scoped>
-.report-page {
+.report-dashboard {
   padding-bottom: 20px;
 }
-.card-header {
+.filter-container {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  font-weight: bold;
-  color: #409EFF;
+  flex-wrap: wrap;
+  gap: 10px;
 }
-.pagination-container {
-  margin-top: 20px;
-  display: flex;
-  justify-content: flex-end;
+.filter-label {
+  font-weight: bold;
+  color: #606266;
 }
 </style>

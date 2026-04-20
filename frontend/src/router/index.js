@@ -26,6 +26,12 @@ const routes = [
         meta: { title: '统计分析' }
       },
       {
+        path: 'logs',
+        name: 'Logs',
+        component: () => import('../views/Logs.vue'),
+        meta: { title: '查看记录' }
+      },
+      {
         path: 'changelog',
         name: 'Changelog',
         component: () => import('../views/Changelog.vue'),

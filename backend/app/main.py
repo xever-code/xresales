@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from jose import JWTError, jwt
+from sqlalchemy import func
 
 # 导入我们刚刚写的模块
 from core.database import get_db, engine
@@ -248,6 +249,95 @@ def export_logs(
         headers={"Content-Disposition": "attachment; filename=activity_logs_export.xlsx"}
     )
 
+# 👇 1. 更新大区列表接口：排除 'system'
+@app.get("/api/users/regions", tags=["System"])
+def get_user_regions(db: Session = Depends(get_db)):
+    """获取所有人员的大区列表 (排除系统内置账号)"""
+    # 增加 .filter(models.User.region != 'system')
+    regions = db.query(models.User.region).filter(
+        models.User.region.isnot(None),
+        models.User.region != 'system',
+        models.User.region != 'System'
+    ).distinct().all()
+    return [r[0] for r in regions if r[0] and r[0].strip()]
+
+# 👇 2. 更新统计接口：在循环逻辑中增加过滤
+@app.get("/api/stats/summary", tags=["System"])
+def get_stats_summary(
+    start_date: str = None,
+    end_date: str = None,
+    region: str = None,
+    db: Session = Depends(get_db), 
+    current_user: models.User = Depends(get_current_user)
+):
+    """获取汇总统计数据 (排除 system 分区数据)"""
+    
+    query = db.query(models.ActivityLog, models.Hospital, models.User).outerjoin(
+        models.Hospital, models.ActivityLog.hospital_code == models.Hospital.code
+    ).outerjoin(
+        models.User, models.ActivityLog.user_id == models.User.id
+    )
+    
+    if current_user.role != "admin":
+        query = query.filter(models.ActivityLog.user_id == current_user.id)
+        
+    if start_date:
+        query = query.filter(models.ActivityLog.visit_time_start >= start_date)
+    if end_date:
+        end_dt = f"{end_date} 23:59:59" if len(end_date) == 10 else end_date
+        query = query.filter(models.ActivityLog.visit_time_start <= end_dt)
+        
+    if region:
+        query = query.filter(models.User.region == region)
+        
+    results = query.all()
+    
+    region_dict = {}
+    hospital_dict = {}
+    act_dict = {}
+    opp_dict = {}
+    
+    for log, hosp, user in results:
+        # 🛑 核心过滤：如果人员所属区域是 system，则不计入任何统计图表
+        u_region = user.region if user and user.region else "未知大区"
+        if u_region.lower() == 'system':
+            continue
+
+        hours = 0
+        if log.visit_time_start and log.visit_time_end:
+            delta = log.visit_time_end - log.visit_time_start
+            hours = delta.total_seconds() / 3600.0
+            
+        if hours <= 0:
+            continue
+
+        # 1. 区域工时
+        region_dict[u_region] = region_dict.get(u_region, 0) + hours
+        
+        # 2. 客户工时
+        h_name = hosp.name if hosp else "未知客户"
+        hospital_dict[h_name] = hospital_dict.get(h_name, 0) + hours
+        
+        # 3. 任务类型和业务机会
+        if log.activity_types:
+            for t in log.activity_types:
+                act_dict[t] = act_dict.get(t, 0) + hours
+        if log.opportunities:
+            for o in log.opportunities:
+                opp_dict[o] = opp_dict.get(o, 0) + hours
+                
+    top_hospitals = sorted(hospital_dict.items(), key=lambda x: x[1], reverse=True)[:10]
+
+    return {
+        "region_stats": [{"name": k, "value": round(v, 1)} for k, v in region_dict.items()],
+        "hospital_stats": {
+            "names": [x[0] for x in top_hospitals],
+            "values": [round(x[1], 1) for x in top_hospitals]
+        },
+        "activity_stats": [{"name": k, "value": round(v, 1)} for k, v in act_dict.items()],
+        "opportunity_stats": [{"name": k, "value": round(v, 1)} for k, v in opp_dict.items()]
+    }
+
 # ==========================
 # 客户(医院)管理接口 (仅限 Admin)
 # ==========================
@@ -343,3 +433,40 @@ def export_hospitals(db: Session = Depends(get_db), current_user: models.User = 
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=hospitals_export.xlsx"}
     )
+
+@app.get("/api/stats/summary", tags=["System"])
+def get_stats_summary(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """获取汇总统计数据用于图表展示"""
+    query = db.query(models.ActivityLog)
+    
+    # 权限隔离
+    if current_user.role != "admin":
+        query = query.filter(models.ActivityLog.user_id == current_user.id)
+    
+    logs = query.all()
+    
+    # 1. 统计任务类型分布
+    type_counts = {}
+    for log in logs:
+        if log.activity_types:
+            for t in log.activity_types:
+                type_counts[t] = type_counts.get(t, 0) + 1
+    
+    # 2. 统计客户分布 (取前10)
+    hospital_counts = {}
+    # 获取所有医院名称映射
+    h_map = {h.code: h.name for h in db.query(models.Hospital).all()}
+    for log in logs:
+        name = h_map.get(log.hospital_code, "未知客户")
+        hospital_counts[name] = hospital_counts.get(name, 0) + 1
+    
+    # 排序取前10
+    top_hospitals = sorted(hospital_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+
+    return {
+        "type_stats": [{"name": k, "value": v} for k, v in type_counts.items()],
+        "hospital_stats": {
+            "names": [x[0] for x in top_hospitals],
+            "values": [x[1] for x in top_hospitals]
+        }
+    }

@@ -2,13 +2,16 @@
   <el-container class="layout-container">
     
     <el-aside width="220px" class="pc-aside">
-      <div class="logo">DC 管理系统</div>
+      <div class="logo">IT售前工时管理系统</div>
       <el-menu :default-active="route.path" router class="aside-menu" background-color="#001529" text-color="#a6adb4" active-text-color="#ffffff">
         <el-menu-item index="/input">
           <el-icon><Edit /></el-icon><span>工时录入</span>
         </el-menu-item>
         <el-menu-item index="/report">
           <el-icon><TrendCharts /></el-icon><span>统计分析</span>
+        </el-menu-item>
+        <el-menu-item index="/logs">
+          <el-icon><List /></el-icon><span>查看记录</span>
         </el-menu-item>
         
         <el-menu-item index="/changelog">

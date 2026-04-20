@@ -1,0 +1,36 @@
+from pydantic import BaseModel, Field
+from typing import List, Optional
+from datetime import datetime
+
+# ==========================
+# 认证相关模型
+# ==========================
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+    role: str
+    username: str
+    real_name: str
+
+# ==========================
+# 工时日志录入模型
+# ==========================
+class LogCreate(BaseModel):
+    hospital_code: str = Field(..., description="医院编码")
+    contact_person: str = Field(..., description="拜访对象")
+    visit_time_start: datetime = Field(..., description="开始时间")
+    visit_time_end: datetime = Field(..., description="结束时间")
+    purpose: str = Field(..., description="活动目的")
+    activity_types: List[str] = Field(default=[], description="任务类型")
+    next_step: Optional[str] = Field(default="", description="下一步计划")
+    opportunities: List[str] = Field(default=[], description="新业务机会")
+
+    class Config:
+        # 允许传入比模型定义更多的字段（兼容前端可能传多的情况）
+        extra = "ignore"
+# ==========================
+# 密码修改模型
+# ==========================
+class PasswordChange(BaseModel):
+    old_password: str = Field(..., description="原密码")
+    new_password: str = Field(..., description="新密码")

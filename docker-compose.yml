@@ -1,0 +1,55 @@
+version: '3.8'
+
+services:
+  # 1. 数据库服务
+  db:
+    image: postgres:15-alpine
+    container_name: dc_db
+    restart: always
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: YourStrongPassword123!
+      POSTGRES_DB: presales_db
+      TZ: Asia/Shanghai
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d # 自动执行初始化 SQL
+    networks:
+      - dc_net
+
+  # 2. 后端 API 服务
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: dc_backend
+    restart: always
+    environment:
+      - DATABASE_URL=postgresql://admin:YourStrongPassword123!@db:5432/presales_db
+      - DEEPSEEK_API_KEY=your_api_key_here
+      - TZ=Asia/Shanghai
+    depends_on:
+      - db
+    networks:
+      - dc_net
+
+  # 3. 前端 Web 服务 (Nginx)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: dc_frontend
+    restart: always
+    ports:
+      - "8089:80" # 对外暴露 80 端口
+    depends_on:
+      - backend
+    networks:
+      - dc_net
+
+networks:
+  dc_net:
+    driver: bridge
+
+volumes:
+  pgdata:

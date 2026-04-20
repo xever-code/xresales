@@ -51,6 +51,7 @@
               size="large"
               :editable="false"
               class="full-width"
+              @change="handleStartTimeChange"
             />
           </el-form-item>
 
@@ -58,11 +59,13 @@
             <el-date-picker 
               v-model="form.visit_time_end" 
               type="datetime" 
-              placeholder="选择结束时间" 
+              placeholder="请先选择开始时间" 
               value-format="YYYY-MM-DD HH:mm:ss"
               size="large"
               :editable="false"
               class="full-width"
+              :disabled="!form.visit_time_start"
+              :disabled-date="disabledEndDate"
             />
           </el-form-item>
         </div>
@@ -141,6 +144,43 @@ const rules = {
   purpose: [{ required: true, message: '请填写活动目的', trigger: 'blur' }]
 }
 
+// ==========================================
+// 🚀 时间联动与锁定逻辑
+// ==========================================
+
+// 1. 监听开始时间的改变
+const handleStartTimeChange = (val) => {
+  if (!val) {
+    // 如果清空了开始时间，连带清空结束时间
+    form.value.visit_time_end = ''
+    return
+  }
+  
+  // 如果结束时间已经填了，但用户又改了开始日期，自动把结束日期同步过去（保留时分秒）
+  if (form.value.visit_time_end) {
+    const newStartDate = val.split(' ')[0]
+    const oldEndTime = form.value.visit_time_end.split(' ')[1]
+    form.value.visit_time_end = `${newStartDate} ${oldEndTime}`
+  }
+}
+
+// 2. 锁定结束时间面板，禁用非开始日期的所有天数
+const disabledEndDate = (time) => {
+  if (!form.value.visit_time_start) return false // 理论上选不到这，因为 input 被 disabled 了
+  
+  // 提取开始日期的部分并归零时间
+  const startDateStr = form.value.visit_time_start.split(' ')[0]
+  const startDate = new Date(startDateStr.replace(/-/g, '/'))
+  startDate.setHours(0, 0, 0, 0)
+
+  // 待校验的面板日期
+  const checkDate = new Date(time)
+  checkDate.setHours(0, 0, 0, 0)
+
+  // 返回 true 表示禁用该天。如果不是同一天，就禁用。
+  return startDate.getTime() !== checkDate.getTime()
+}
+
 // --- 初始化与获取字典配置 ---
 onMounted(async () => {
   try {
@@ -174,16 +214,39 @@ const submitLog = async () => {
   
   await formRef.value.validate(async (valid) => {
     if (valid) {
-      if (form.value.visit_time_end < form.value.visit_time_start) {
-        ElMessage.error('结束时间不能早于开始时间！')
-        return
+      
+      // ==========================================
+      // 🚀 智能跨天时间处理逻辑 (依然生效)
+      // ==========================================
+      let tStart = new Date(form.value.visit_time_start.replace(/-/g, '/')).getTime()
+      let tEnd = new Date(form.value.visit_time_end.replace(/-/g, '/')).getTime()
+
+      if (tEnd < tStart) {
+        let startDate = form.value.visit_time_start.split(' ')[0]
+        let endDate = form.value.visit_time_end.split(' ')[0]
+
+        if (startDate === endDate) {
+          // 自动将结束时间顺延 24 小时
+          let nextDay = new Date(tEnd + 24 * 60 * 60 * 1000)
+          const y = nextDay.getFullYear()
+          const m = String(nextDay.getMonth() + 1).padStart(2, '0')
+          const d = String(nextDay.getDate()).padStart(2, '0')
+          const hh = String(nextDay.getHours()).padStart(2, '0')
+          const mm = String(nextDay.getMinutes()).padStart(2, '0')
+          const ss = String(nextDay.getSeconds()).padStart(2, '0')
+          
+          form.value.visit_time_end = `${y}-${m}-${d} ${hh}:${mm}:${ss}`
+          ElMessage.success('✨ 已自动识别为跨天工作，结束时间顺延至次日')
+        } else {
+          ElMessage.error('结束时间不能早于开始时间！')
+          return
+        }
       }
 
       submitting.value = true
       try {
         await request.post('/logs', form.value)
         ElMessage.success('🎉 提交成功！数据已入库。')
-        // 提交成功后重置表单，保留时间方便连续录入
         formRef.value.resetFields()
         form.value.activity_types = []
         form.value.opportunities = []
@@ -205,7 +268,7 @@ const submitLog = async () => {
 .input-page {
   display: flex;
   justify-content: center;
-  padding-bottom: 80px; /* 为移动端的吸底按钮留出空间 */
+  padding-bottom: 80px; 
 }
 
 .form-card {
@@ -260,7 +323,7 @@ const submitLog = async () => {
   }
   
   .time-group {
-    flex-direction: column; /* 手机端时间选择器变为上下排布 */
+    flex-direction: column; 
     gap: 0;
   }
 

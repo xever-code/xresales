@@ -10,6 +10,10 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from jose import JWTError, jwt
 from sqlalchemy import func
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+from sqlalchemy.orm import Session
+import pandas as pd
+import io
 
 # 导入我们刚刚写的模块
 from core.database import get_db, engine
@@ -363,53 +367,45 @@ def get_hospitals_list(
     return {"total": total, "items": items}
 
 
-@app.post("/api/hospitals/import", tags=["Hospital"])
-async def import_hospitals(
-    file: UploadFile = File(...), 
-    db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)
-):
-    """通过 Excel/CSV 导入或更新客户数据"""
-    if current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="无权访问")
-        
-    contents = await file.read()
+@app.post("/api/hospitals/import", tags=["Hospitals"])
+async def import_hospitals(file: UploadFile = File(...), db: Session = Depends(get_db)):
     try:
-        # 兼容 Excel 和 CSV
-        if file.filename.endswith('.xlsx') or file.filename.endswith('.xls'):
-            df = pd.read_excel(io.BytesIO(contents))
-        else:
-            try:
-                df = pd.read_csv(io.BytesIO(contents), encoding='utf-8')
-            except:
-                df = pd.read_csv(io.BytesIO(contents), encoding='gbk')
-    except Exception as e:
-        raise HTTPException(status_code=400, detail="文件解析失败，请确保是正确的 Excel 或 CSV 格式")
+        contents = await file.read()
         
-    required_cols = {'code', 'name', 'region'}
-    if not required_cols.issubset(df.columns):
-        raise HTTPException(status_code=400, detail=f"文件表头必须包含: {', '.join(required_cols)}")
+        # 读取 Excel，并把所有 NaN 替换为空字符串
+        df = pd.read_excel(io.BytesIO(contents)).fillna("")
         
-    success_count = 0
-    for _, row in df.iterrows():
-        code = str(row['code']).strip()
-        name = str(row['name']).strip()
-        region = str(row['region']).strip() if pd.notna(row['region']) else "未知区域"
-        
-        if not code or not name or code == 'nan':
-            continue
+        success_count = 0
+        for index, row in df.iterrows():
+            # 👇 将原来获取中文表头的地方，全部换成与数据库一致的英文字段
+            code = str(row.get('code', '')).strip()
+            name = str(row.get('name', '')).strip()
             
-        # 核心逻辑：如果编码存在则更新名称和区域，不存在则新建 (Upsert)
-        existing = db.query(models.Hospital).filter(models.Hospital.code == code).first()
-        if existing:
-            existing.name = name
-            existing.region = region
-        else:
-            new_hosp = models.Hospital(code=code, name=name, region=region)
-            db.add(new_hosp)
-        success_count += 1
+            # 核心数据为空则跳过
+            if not code or not name:
+                continue
+                
+            classification = str(row.get('classification', '')).strip()
+            seg = str(row.get('seg', '')).strip()
+            region = str(row.get('region', '')).strip()
+            
+            # 写入数据库对象
+            new_hosp = models.Hospital(
+                code=code,
+                name=name,
+                classification=classification if classification else None,
+                seg=seg if seg else None,
+                region=region if region else None
+            )
+            db.merge(new_hosp) 
+            success_count += 1
+            
+        db.commit()
+        return {"status": "success", "message": f"成功处理 {success_count} 条客户数据！"}
         
-    db.commit()
-    return {"status": "success", "message": f"成功导入/更新 {success_count} 条客户数据"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"解析 Excel 失败: {str(e)}")
 
 
 @app.get("/api/hospitals/export", tags=["Hospital"])

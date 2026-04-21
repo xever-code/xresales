@@ -36,3 +36,10 @@ class LogCreate(BaseModel):
 class PasswordChange(BaseModel):
     old_password: str = Field(..., description="原密码")
     new_password: str = Field(..., description="新密码")
+
+class HospitalBase(BaseModel):
+    code: str
+    name: str
+    region: str
+    classification: Optional[str] = None # 字段名已统一
+    seg: Optional[str] = None

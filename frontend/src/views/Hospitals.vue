@@ -42,6 +42,13 @@
             <el-tag size="small" type="info">{{ row.region }}</el-tag>
           </template>
         </el-table-column>
+        <el-table-column prop="classification" label="医院等级" width="120">
+          <template #default="{ row }">
+            <el-tag size="small" effect="plain">{{ row.classification || '-' }}</el-tag>
+          </template>
+        </el-table-column>
+
+        <el-table-column prop="seg" label="业务细分" width="150" />
       </el-table>
 
       <div class="pagination-container">

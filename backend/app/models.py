@@ -25,6 +25,8 @@ class Hospital(Base):
     code = Column(String(100), unique=True, index=True, nullable=False)
     name = Column(String(255), nullable=False)
     region = Column(String(100))
+    classification = Column(String, nullable=True) # 直接对应数据库 classification 列
+    seg = Column(String, nullable=True)
 
 class SystemConfig(Base):
     __tablename__ = "system_configs"

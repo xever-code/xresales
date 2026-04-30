@@ -7,11 +7,13 @@
         <el-select 
           v-if="role === 'admin'"
           v-model="selectedRegion" 
-          placeholder="全部大区" 
-          clearable 
+          placeholder="筛选大区" 
           @change="fetchData"
-          style="width: 140px; margin-right: 15px;"
+          style="width: 220px; margin-right: 15px;"
         >
+          <el-option label="全部大区" value="all" />
+          <el-option label="全部大区（不含Central）" value="exclude_central" />
+          <el-divider style="margin: 4px 0" />
           <el-option v-for="r in regionOptions" :key="r" :label="r" :value="r" />
         </el-select>
 
@@ -30,27 +32,48 @@
     </el-card>
 
     <el-row :gutter="20" style="margin-bottom: 20px;">
-      <el-col :xs="24" :sm="10">
-        <el-card shadow="hover" header="🌍 各大区工时投入 (基于团队)">
-          <div ref="regionChartRef" style="height: 350px;"></div>
+      <el-col :span="24">
+        <el-card shadow="hover">
+          <div ref="regionChartRef" style="height: 380px;"></div>
         </el-card>
       </el-col>
-      <el-col :xs="24" :sm="14">
-        <el-card shadow="hover" header="🏥 Top 10 客户工时投入">
-          <div ref="hospChartRef" style="height: 350px;"></div>
+    </el-row>
+
+    <el-row :gutter="20" style="margin-bottom: 20px;">
+      <el-col :span="24">
+        <el-card shadow="hover">
+          <div ref="userChartRef" style="height: 500px;"></div>
+        </el-card>
+      </el-col>
+    </el-row>
+
+    <el-row :gutter="20" style="margin-bottom: 20px;">
+      <el-col :span="24">
+        <el-card shadow="hover">
+          <template #header>
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <span style="font-weight: bold; font-size: 16px;">🏥 Top 客户工时投入排行</span>
+              <el-button type="success" size="small" @click="exportTop3Hospitals">导出 Top3 客户明细</el-button>
+            </div>
+          </template>
+          <div ref="hospChartRef" style="height: 400px;"></div>
         </el-card>
       </el-col>
     </el-row>
 
     <el-row :gutter="20">
-      <el-col :xs="24" :sm="12">
-        <el-card shadow="hover" header="🎯 任务类型工时占比">
-          <div ref="actChartRef" style="height: 350px;"></div>
-        </el-card>
-      </el-col>
-      <el-col :xs="24" :sm="12">
-        <el-card shadow="hover" header="💡 业务机会工时分布">
-          <div ref="oppChartRef" style="height: 350px;"></div>
+      <el-col :span="24">
+        <el-card shadow="hover">
+          <template #header>
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <span style="font-weight: bold; font-size: 16px;">🎯 任务类型 & 💡 业务机会工时占比汇总</span>
+              <el-button type="primary" size="small" @click="downloadCombinedPies">合并下载图片</el-button>
+            </div>
+          </template>
+          <div style="display: flex; justify-content: space-around; flex-wrap: wrap;">
+            <div ref="actChartRef" style="width: 48%; height: 400px; min-width: 320px;"></div>
+            <div ref="oppChartRef" style="width: 48%; height: 400px; min-width: 320px;"></div>
+          </div>
         </el-card>
       </el-col>
     </el-row>
@@ -59,13 +82,16 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted, nextTick } from 'vue'
+import { ElMessage } from 'element-plus'
 import * as echarts from 'echarts'
 import request from '../api/request'
 
 const role = ref(localStorage.getItem('role') || 'user')
 const dateRange = ref([])
-const selectedRegion = ref('')
+const selectedRegion = ref('exclude_central')
 const regionOptions = ref([])
+
+const currentTopHospitals = ref([]) // 👇 新增：用于缓存当前展示的客户名单
 
 const shortcuts = [
   { text: '最近一周', value: () => { const end = new Date(); const start = new Date(); start.setTime(start.getTime() - 3600 * 1000 * 24 * 7); return [start, end] } },
@@ -74,31 +100,37 @@ const shortcuts = [
 ]
 
 const regionChartRef = ref(null)
+const userChartRef = ref(null)
 const hospChartRef = ref(null)
 const actChartRef = ref(null)
 const oppChartRef = ref(null)
 
 let charts = []
 
-// 获取可用的大区列表
+const commonToolbox = {
+  show: true,
+  feature: { saveAsImage: { title: '下载', pixelRatio: 2 } }
+}
+
 const fetchRegions = async () => {
   if (role.value === 'admin') {
     try {
-      regionOptions.value = await request.get('/users/regions')
+      const res = await request.get('/users/regions')
+      regionOptions.value = res.filter(r => r.toLowerCase() !== 'central')
     } catch (err) {
-      console.error("获取大区列表失败", err)
+      console.error("获取大区失败", err)
     }
   }
 }
 
-// 获取图表数据
 const fetchData = async () => {
   let params = {}
   if (dateRange.value && dateRange.value.length === 2) {
     params.start_date = dateRange.value[0]
     params.end_date = dateRange.value[1]
   }
-  if (selectedRegion.value) {
+
+  if (selectedRegion.value && selectedRegion.value !== 'all') {
     params.region = selectedRegion.value
   }
 
@@ -107,7 +139,7 @@ const fetchData = async () => {
     await nextTick()
     updateCharts(data)
   } catch (err) {
-    console.error("获取统计数据失败", err)
+    console.error("加载数据失败", err)
   }
 }
 
@@ -115,58 +147,165 @@ const updateCharts = (data) => {
   if (charts.length === 0) {
     charts = [
       echarts.init(regionChartRef.value),
+      echarts.init(userChartRef.value),
       echarts.init(hospChartRef.value),
       echarts.init(actChartRef.value),
       echarts.init(oppChartRef.value)
     ]
   }
 
-  const [regionChart, hospChart, actChart, oppChart] = charts
+  const [regionChart, userChart, hospChart, actChart, oppChart] = charts
 
-  // 1. 区域工时分布 (饼图)
+  // 1. 各区工时汇总
+  let regionStats = [...(data.region_stats || [])];
+  if (selectedRegion.value === 'exclude_central') {
+    regionStats = regionStats.filter(i => i.name.toLowerCase() !== 'central');
+  }
+  regionStats.sort((a, b) => b.value - a.value);
+
   regionChart.setOption({
-    tooltip: { trigger: 'item', formatter: '{b}: {c} 小时 ({d}%)' },
+    title: { text: '🌍 各区工时投入汇总', left: 'center' },
+    toolbox: commonToolbox,
+    tooltip: { trigger: 'axis' },
+    xAxis: { type: 'category', data: regionStats.map(i => i.name), axisLabel: { interval: 0 } },
+    yAxis: { type: 'value', name: '小时' },
     series: [{
-      type: 'pie', radius: '60%', data: data.region_stats,
-      itemStyle: { borderRadius: 4, borderColor: '#fff', borderWidth: 2 }
+      type: 'bar', data: regionStats.map(i => i.value),
+      label: { show: true, position: 'top' },
+      itemStyle: { color: '#409EFF' },
+      barMaxWidth: 60
     }]
   })
 
-  // 2. 客户投入排行 (条形图)
+  // 2. 员工排行
+  if (data.user_stats) {
+    userChart.setOption({
+      title: { text: '🏆 员工工时投入排行', left: 'center' },
+      toolbox: commonToolbox,
+      tooltip: { trigger: 'axis' },
+      xAxis: { type: 'category', data: data.user_stats.names, axisLabel: { interval: 0, rotate: 30 } },
+      yAxis: { type: 'value', name: '小时' },
+      series: [{
+        type: 'bar', data: data.user_stats.values,
+        label: { show: true, position: 'top' },
+        itemStyle: { color: '#67C23A' }
+      }]
+    })
+  }
+
+  // 3. 客户投入
+  let hospNames = data.hospital_stats?.names || [];
+  let hospValues = data.hospital_stats?.values || [];
+  
+  if (selectedRegion.value !== 'Central' && selectedRegion.value !== 'all') {
+    const validIdx = hospNames.reduce((acc, name, i) => {
+      if (name !== '研发创新与综合事务') acc.push(i);
+      return acc;
+    }, []);
+    hospNames = validIdx.map(i => hospNames[i]);
+    hospValues = validIdx.map(i => hospValues[i]);
+  }
+
+  // 👇 新增：将当前显示的客户列表存起来，因为图表数据是倒序的(.reverse)，所以真实的 Top3 在数组末尾
+  currentTopHospitals.value = [...hospNames].reverse();
+
   hospChart.setOption({
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-    grid: { left: '3%', right: '8%', bottom: '3%', containLabel: true },
+    toolbox: commonToolbox,
+    tooltip: { trigger: 'axis' },
+    grid: { left: '3%', right: '10%', bottom: '3%', containLabel: true },
     xAxis: { type: 'value', name: '小时' },
-    yAxis: { 
-      type: 'category', 
-      data: data.hospital_stats.names.reverse(),
-      axisLabel: { interval: 0, width: 120, overflow: 'truncate' }
-    },
-    series: [{ 
-      type: 'bar', 
-      data: data.hospital_stats.values.reverse(), 
-      itemStyle: { color: '#409EFF', borderRadius: [0, 4, 4, 0] },
-      label: { show: true, position: 'right' }
+    yAxis: { type: 'category', inverse: true, data: hospNames },
+    series: [{
+      type: 'bar', data: hospValues,
+      label: { show: true, position: 'right' },
+      itemStyle: { color: '#409EFF' }
     }]
   })
 
-  // 3. 任务类型 (环形图)
+  // 4. 任务类型占比
   actChart.setOption({
-    tooltip: { trigger: 'item', formatter: '{b}: {c} 小时 ({d}%)' },
+    title: { text: '🎯 任务类型占比', left: 'center', top: '10' },
+    tooltip: { trigger: 'item', formatter: '{b}: {c}h ({d}%)' },
     series: [{
-      type: 'pie', radius: ['40%', '70%'], data: data.activity_stats,
-      itemStyle: { borderRadius: 5, borderColor: '#fff', borderWidth: 2 }
+      type: 'pie', radius: ['40%', '70%'], data: data.activity_stats || [],
+      label: { show: true, formatter: '{b}\n{d}%' }
     }]
   })
 
-  // 4. 业务机会 (环形图)
+  // 5. 业务机会分布
   oppChart.setOption({
-    tooltip: { trigger: 'item', formatter: '{b}: {c} 小时 ({d}%)' },
+    title: { text: '💡 业务机会分布', left: 'center', top: '10' },
+    tooltip: { trigger: 'item', formatter: '{b}: {c}h ({d}%)' },
     series: [{
-      type: 'pie', radius: ['40%', '70%'], data: data.opportunity_stats,
-      itemStyle: { borderRadius: 5, borderColor: '#fff', borderWidth: 2 }
+      type: 'pie', radius: ['40%', '70%'], data: data.opportunity_stats || [],
+      label: { show: true, formatter: '{b}\n{d}%' }
     }]
   })
+}
+
+// 👇 新增：导出 Top 3 客户记录的专属功能
+const exportTop3Hospitals = async () => {
+  const top3 = currentTopHospitals.value.slice(0, 3);
+  if (top3.length === 0) {
+    ElMessage.warning('当前暂无客户数据');
+    return;
+  }
+
+  ElMessage.info(`正在生成前 3 名客户记录（${top3.join('、')}），请稍候...`);
+
+  // 拼装请求参数
+  let params = { hospital_names: top3.join(',') };
+  if (selectedRegion.value && selectedRegion.value !== 'all') {
+    params.region = selectedRegion.value;
+  }
+  if (dateRange.value && dateRange.value.length === 2) {
+    params.start_date = dateRange.value[0];
+    params.end_date = dateRange.value[1];
+  }
+
+  try {
+    const res = await request.get('/logs/export', { 
+      params, 
+      responseType: 'blob' // 必须配置，否则下载的 Excel 会损坏
+    });
+    
+    // 创建虚拟 a 标签触发文件下载
+    const blob = new Blob([res], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `Top3客户工时明细_${new Date().toISOString().split('T')[0]}.xlsx`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(link.href);
+    
+    ElMessage.success('Top 3 客户明细导出成功！');
+  } catch (err) {
+    console.error(err);
+    ElMessage.error('导出失败，请检查网络后重试');
+  }
+}
+
+// 拼接下载饼图
+const downloadCombinedPies = () => {
+  const canvas1 = actChartRef.value.querySelector('canvas');
+  const canvas2 = oppChartRef.value.querySelector('canvas');
+  if (!canvas1 || !canvas2) return;
+
+  const combinedCanvas = document.createElement('canvas');
+  const ctx = combinedCanvas.getContext('2d');
+  combinedCanvas.width = canvas1.width + canvas2.width;
+  combinedCanvas.height = Math.max(canvas1.height, canvas2.height);
+  
+  ctx.fillStyle = '#FFFFFF';
+  ctx.fillRect(0, 0, combinedCanvas.width, combinedCanvas.height);
+  ctx.drawImage(canvas1, 0, 0);
+  ctx.drawImage(canvas2, canvas1.width, 0);
+
+  const link = document.createElement('a');
+  link.download = `任务与机会工时分析_${new Date().toISOString().split('T')[0]}.png`;
+  link.href = combinedCanvas.toDataURL('image/png');
+  link.click();
 }
 
 const handleResize = () => charts.forEach(c => c.resize())

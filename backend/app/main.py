@@ -1,26 +1,22 @@
 import io
-import pandas as pd
-from fastapi import UploadFile, File
-from fastapi.responses import StreamingResponse
 import os
 from datetime import datetime, timedelta
-from fastapi import FastAPI, Depends, HTTPException, status
+import pandas as pd
+
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from jose import JWTError, jwt
-from sqlalchemy import func
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
-from sqlalchemy.orm import Session
-import pandas as pd
-import io
+from sqlalchemy import func, or_
 
 # 导入我们刚刚写的模块
 from core.database import get_db, engine
 import models
 import schemas
 
-# (可选) 启动时自动在数据库创建表，因为我们在 docker 里用了 sql 脚本，这步其实是双保险
+# 启动时自动在数据库创建表
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Digital Consulting 售前管理系统 API", version="2.0.0")
@@ -42,7 +38,6 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 600
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
 
-# 获取当前登录用户 (依赖注入)
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(status_code=401, detail="无效的凭证，请重新登录")
     try:
@@ -64,14 +59,17 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
 
 @app.post("/api/auth/login", response_model=schemas.Token, tags=["Auth"])
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    """用户登录接口，签发 JWT Token"""
     user = db.query(models.User).filter(models.User.username == form_data.username).first()
     
-    # MVP阶段：为了兼容旧数据，这里先使用明文密码比对。后续上生产建议改用 passlib 校验哈希。
     if not user or form_data.password != user.password_hash:
         raise HTTPException(status_code=400, detail="用户名或密码错误")
+
+    # 👇 新增：登录时检查维护状态
+    maintenance = db.query(models.SystemConfig).filter(models.SystemConfig.config_type == "maintenance").first()
+    # 如果系统维护中，且登录的不是管理员，直接拒绝登录
+    if maintenance and user.role != "admin":
+        raise HTTPException(status_code=503, detail="系统维护中，请稍后再试")
         
-    # 生成 Token
     expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     token = jwt.encode({"sub": user.username, "exp": expire}, SECRET_KEY, algorithm=ALGORITHM)
     
@@ -89,16 +87,12 @@ def change_password(
     db: Session = Depends(get_db), 
     current_user: models.User = Depends(get_current_user)
 ):
-    """修改当前登录用户的密码"""
-    # 1. 验证旧密码是否正确
     if data.old_password != current_user.password_hash:
         raise HTTPException(status_code=400, detail="原密码输入错误")
     
-    # 2. 不能与旧密码相同
     if data.old_password == data.new_password:
         raise HTTPException(status_code=400, detail="新密码不能与原密码相同")
         
-    # 3. 更新密码
     current_user.password_hash = data.new_password
     db.commit()
     
@@ -106,7 +100,6 @@ def change_password(
 
 @app.get("/api/configs", tags=["System"])
 def get_configs(db: Session = Depends(get_db)):
-    """获取系统字典配置 (任务类型、业务机会)"""
     configs = db.query(models.SystemConfig).all()
     result = {"visit_type": [], "opportunity_type": []}
     for c in configs:
@@ -114,9 +107,36 @@ def get_configs(db: Session = Depends(get_db)):
             result[c.config_type].append(c.label)
     return result
 
+# ==========================
+# 系统维护控制接口
+# ==========================
+@app.get("/api/system/maintenance", tags=["System"])
+def get_maintenance_status(db: Session = Depends(get_db)):
+    """查询系统是否处于维护模式"""
+    conf = db.query(models.SystemConfig).filter(models.SystemConfig.config_type == "maintenance").first()
+    return {"is_maintenance": True if conf else False}
+
+@app.post("/api/system/maintenance", tags=["System"])
+def toggle_maintenance(data: dict, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """开启/关闭系统维护模式 (仅限Admin)"""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="无权操作")
+        
+    is_maintenance = data.get("is_maintenance", False)
+    
+    # 先清理掉旧的配置
+    db.query(models.SystemConfig).filter(models.SystemConfig.config_type == "maintenance").delete()
+    
+    # 如果开启维护，则写入一条记录
+    if is_maintenance:
+        new_conf = models.SystemConfig(config_type="maintenance", label="true")
+        db.add(new_conf)
+        
+    db.commit()
+    return {"status": "success", "message": "系统维护状态已更新", "is_maintenance": is_maintenance}
+
 @app.get("/api/hospitals/search", tags=["Hospital"])
 def search_hospitals(keyword: str, db: Session = Depends(get_db), current_user = Depends(get_current_user)):
-    """基于关键字模糊搜索医院"""
     hospitals = db.query(models.Hospital).filter(
         models.Hospital.name.ilike(f"%{keyword}%")
     ).limit(15).all()
@@ -129,7 +149,10 @@ def create_log(log_data: schemas.LogCreate, db: Session = Depends(get_db), curre
     
     new_log = models.ActivityLog(
         user_id=current_user.id,
-        user_name=current_user.real_name,  # 强制使用当前登录人的真实姓名
+        # 👇 建议保持 user_name 为账号名，real_name 为真实姓名，分工明确
+        user_name=current_user.username,  
+        real_name=current_user.real_name,  # 👈 新增：强制写入当前用户的真实姓名
+        
         hospital_code=log_data.hospital_code,
         contact_person=log_data.contact_person,
         visit_time_start=log_data.visit_time_start,
@@ -146,66 +169,104 @@ def create_log(log_data: schemas.LogCreate, db: Session = Depends(get_db), curre
     
     return {"status": "success", "message": "录入成功", "log_id": new_log.id}
 
-@app.get("/api/logs", tags=["Activity"])
-def get_logs(
-    page: int = 1, 
-    size: int = 20, 
+# ==========================
+# 修改工时记录接口
+# ==========================
+@app.put("/api/logs/{log_id}", tags=["Activity"])
+def update_log(
+    log_id: int, 
+    data: dict, 
     db: Session = Depends(get_db), 
     current_user: models.User = Depends(get_current_user)
 ):
-    """获取统计分析日志（自带权限隔离，关联查询用户区域）"""
+    log = db.query(models.ActivityLog).filter(models.ActivityLog.id == log_id).first()
+    if not log:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    
+    # 权限校验：管理员可以改所有人，普通员工只能改自己的
+    if current_user.role != "admin" and log.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权修改此记录")
+        
+    if "hospital_code" in data and data["hospital_code"]:
+        log.hospital_code = data["hospital_code"]
+    if "visit_time_start" in data and data["visit_time_start"]:
+        log.visit_time_start = data["visit_time_start"]
+    if "visit_time_end" in data and data["visit_time_end"]:
+        log.visit_time_end = data["visit_time_end"]
+        
+    db.commit()
+    return {"status": "success", "message": "记录修改成功"}
+
+@app.get("/api/logs", tags=["Logs"])
+def get_logs(
+    page: int = 1,          
+    size: int = 15,         
+    start_date: str = None, 
+    end_date: str = None,
+    user_name: str = None,  
+    region: str = None,     
+    db: Session = Depends(get_db), 
+    current_user: models.User = Depends(get_current_user)
+):
     skip = (page - 1) * size
     
-    # 联合查询：把 ActivityLog 和 Hospital、User 连起来
+    # 👇 修改点 1：在查询字段中增加 User.real_name
     query = db.query(
-        models.ActivityLog, 
+        models.ActivityLog,
         models.Hospital.name.label("hospital_name"),
-        models.User.region.label("user_region")  # 查询出该用户所属区域
-    ).outerjoin(
-        models.Hospital, models.ActivityLog.hospital_code == models.Hospital.code
+        models.User.region.label("region"),
+        models.User.real_name.label("real_name")  # 👈 新增：查出用户的真实姓名
     ).outerjoin(
         models.User, models.ActivityLog.user_id == models.User.id
+    ).outerjoin(
+        models.Hospital, models.ActivityLog.hospital_code == models.Hospital.code
     )
     
-    # 🛡️ 核心权限隔离逻辑
+    # 过滤系统账号
+    query = query.filter(
+        or_(models.User.region.is_(None), models.User.region.notin_(['system', 'System']))
+    )
+
     if current_user.role != "admin":
-        # 如果不是管理员，强制加上 user_id 过滤条件
         query = query.filter(models.ActivityLog.user_id == current_user.id)
-        
-    # 按拜访开始时间倒序排列
-    query = query.order_by(models.ActivityLog.visit_time_start.desc().nulls_last())
-    
-    # 计算总数（用于前端分页）
+    else:
+        if user_name:
+            # 👇 核心修改：将原来的 ActivityLog.user_name 改为 ActivityLog.real_name
+            query = query.filter(models.ActivityLog.real_name.ilike(f"%{user_name}%"))
+        if region:
+            query = query.filter(models.User.region == region)
+
+    if start_date:
+        query = query.filter(models.ActivityLog.visit_time_start >= start_date)
+    if end_date:
+        end_dt = f"{end_date} 23:59:59" if len(end_date) == 10 else end_date
+        query = query.filter(models.ActivityLog.visit_time_start <= end_dt)
+
     total = query.count()
-    # 获取当前页数据
-    logs = query.offset(skip).limit(size).all()
+    results = query.order_by(models.ActivityLog.visit_time_start.desc()).offset(skip).limit(size).all()
     
-    # 格式化拼装数据
-    result = []
-    for log, h_name, u_region in logs:
-        result.append({
-            "id": log.id,
-            "user_name": log.real_name or log.user_name or "未知员工",
-            "region": u_region or "未知区域", # 新增区域字段
-            "hospital_name": h_name or "未知客户 (" + str(log.hospital_code) + ")",
-            "contact_person": log.contact_person,
-            "visit_time_start": log.visit_time_start,
-            "visit_time_end": log.visit_time_end,
-            "purpose": log.purpose,
-            "activity_types": log.activity_types if log.activity_types else [],
-            "next_step": log.next_step,
-            "opportunities": log.opportunities if log.opportunities else []
-        })
-        
-    return {"total": total, "items": result}
+    # 👇 修改点 2：将真实姓名组装进返回字典中
+    formatted_logs = []
+    for log, hospital_name, user_region, user_real_name in results:
+        log_dict = {c.name: getattr(log, c.name) for c in log.__table__.columns}
+        log_dict["hospital_name"] = hospital_name
+        log_dict["region"] = user_region
+        # 💡 双保险兜底：如果 user 表里查到了 real_name 就用它，否则退化使用旧版日志里的 user_name
+        log_dict["real_name"] = user_real_name if user_real_name else log.user_name 
+        formatted_logs.append(log_dict)
+    
+    return {"total": total, "items": formatted_logs}
 
 @app.get("/api/logs/export", tags=["Activity"])
 def export_logs(
+    user_name: str = None,  
+    region: str = None,     
+    start_date: str = None,     # 👇 新增：支持时间过滤
+    end_date: str = None,       # 👇 新增：支持时间过滤
+    hospital_names: str = None, # 👇 新增：支持批量传入指定的客户名称
     db: Session = Depends(get_db), 
     current_user: models.User = Depends(get_current_user)
 ):
-    """一键导出工时记录为 Excel"""
-    # 1. 基础查询：联合医院表和用户表获取名称和区域
     query = db.query(
         models.ActivityLog, 
         models.Hospital.name.label("hospital_name"),
@@ -216,20 +277,43 @@ def export_logs(
         models.User, models.ActivityLog.user_id == models.User.id
     )
     
-    # 2. 权限隔离：非管理员只能导出自己的
+    # 过滤系统账号
+    query = query.filter(
+        or_(models.User.region.is_(None), models.User.region.notin_(['system', 'System']))
+    )
+    
     if current_user.role != "admin":
         query = query.filter(models.ActivityLog.user_id == current_user.id)
+    else:
+        if user_name:
+            query = query.filter(models.ActivityLog.real_name.ilike(f"%{user_name}%"))
+        # 👇 新增：支持报表的 exclude_central 选项
+        if region:
+            if region == "exclude_central":
+                query = query.filter(func.lower(models.User.region) != 'central')
+            else:
+                query = query.filter(models.User.region == region)
+                
+    # 👇 新增：报表时间区间过滤
+    if start_date:
+        query = query.filter(models.ActivityLog.visit_time_start >= start_date)
+    if end_date:
+        end_dt = f"{end_date} 23:59:59" if len(end_date) == 10 else end_date
+        query = query.filter(models.ActivityLog.visit_time_start <= end_dt)
+
+    # 👇 新增：只导出特定客户（用于 Top 3 客户导出）
+    if hospital_names:
+        names_list = [name.strip() for name in hospital_names.split(",")]
+        query = query.filter(models.Hospital.name.in_(names_list))
         
-    # 按时间倒序
     query = query.order_by(models.ActivityLog.visit_time_start.desc().nulls_last())
     logs = query.all()
     
-    # 3. 组装 Excel 数据，将列表、时间格式化为可读字符串
     data = []
     for log, h_name, u_region in logs:
         data.append({
             "提交人": log.real_name or log.user_name or "未知员工",
-            "所属区域": u_region or "未知区域",  # 紧跟在提交人后面
+            "所属区域": u_region or "未知区域",
             "拜访客户": h_name or "未知客户",
             "拜访对象": log.contact_person,
             "开始时间": log.visit_time_start.strftime("%Y-%m-%d %H:%M") if log.visit_time_start else "",
@@ -240,7 +324,6 @@ def export_logs(
             "下一步计划": log.next_step
         })
         
-    # 4. 生成 Excel 文件流
     df = pd.DataFrame(data)
     stream = io.BytesIO()
     with pd.ExcelWriter(stream, engine='openpyxl') as writer:
@@ -253,11 +336,8 @@ def export_logs(
         headers={"Content-Disposition": "attachment; filename=activity_logs_export.xlsx"}
     )
 
-# 👇 1. 更新大区列表接口：排除 'system'
 @app.get("/api/users/regions", tags=["System"])
 def get_user_regions(db: Session = Depends(get_db)):
-    """获取所有人员的大区列表 (排除系统内置账号)"""
-    # 增加 .filter(models.User.region != 'system')
     regions = db.query(models.User.region).filter(
         models.User.region.isnot(None),
         models.User.region != 'system',
@@ -265,7 +345,6 @@ def get_user_regions(db: Session = Depends(get_db)):
     ).distinct().all()
     return [r[0] for r in regions if r[0] and r[0].strip()]
 
-# 👇 2. 更新统计接口：在循环逻辑中增加过滤
 @app.get("/api/stats/summary", tags=["System"])
 def get_stats_summary(
     start_date: str = None,
@@ -274,8 +353,6 @@ def get_stats_summary(
     db: Session = Depends(get_db), 
     current_user: models.User = Depends(get_current_user)
 ):
-    """获取汇总统计数据 (排除 system 分区数据)"""
-    
     query = db.query(models.ActivityLog, models.Hospital, models.User).outerjoin(
         models.Hospital, models.ActivityLog.hospital_code == models.Hospital.code
     ).outerjoin(
@@ -291,8 +368,13 @@ def get_stats_summary(
         end_dt = f"{end_date} 23:59:59" if len(end_date) == 10 else end_date
         query = query.filter(models.ActivityLog.visit_time_start <= end_dt)
         
+    # 👇 修改点：支持特殊筛选“exclude_central”
     if region:
-        query = query.filter(models.User.region == region)
+        if region == "exclude_central":
+            # 排除 Central 大区的所有数据
+            query = query.filter(func.lower(models.User.region) != 'central')
+        else:
+            query = query.filter(models.User.region == region)
         
     results = query.all()
     
@@ -300,9 +382,9 @@ def get_stats_summary(
     hospital_dict = {}
     act_dict = {}
     opp_dict = {}
+    user_dict = {} 
     
     for log, hosp, user in results:
-        # 🛑 核心过滤：如果人员所属区域是 system，则不计入任何统计图表
         u_region = user.region if user and user.region else "未知大区"
         if u_region.lower() == 'system':
             continue
@@ -315,14 +397,22 @@ def get_stats_summary(
         if hours <= 0:
             continue
 
-        # 1. 区域工时
+        # 统计大区、客户等（保持不变）
         region_dict[u_region] = region_dict.get(u_region, 0) + hours
-        
-        # 2. 客户工时
         h_name = hosp.name if hosp else "未知客户"
         hospital_dict[h_name] = hospital_dict.get(h_name, 0) + hours
         
-        # 3. 任务类型和业务机会
+        # 👇 核心修改：统计员工工时时使用 real_name
+        # 逻辑：优先取 log 里的 real_name，如果没有则取 user_name 兜底
+        u_display_name = log.real_name if log.real_name else (log.user_name or "未知员工")
+        
+        # 过滤掉“未知员工”或空名字，保证图表美观
+        if not u_display_name.strip() or u_display_name == "未知员工":
+            continue
+            
+        user_dict[u_display_name] = user_dict.get(u_display_name, 0) + hours
+        
+        # 统计任务类型和机会（保持不变）
         if log.activity_types:
             for t in log.activity_types:
                 act_dict[t] = act_dict.get(t, 0) + hours
@@ -330,13 +420,19 @@ def get_stats_summary(
             for o in log.opportunities:
                 opp_dict[o] = opp_dict.get(o, 0) + hours
                 
+    # 排序并返回（保持不变）
     top_hospitals = sorted(hospital_dict.items(), key=lambda x: x[1], reverse=True)[:10]
+    sorted_users = sorted(user_dict.items(), key=lambda x: x[1], reverse=True)
 
     return {
         "region_stats": [{"name": k, "value": round(v, 1)} for k, v in region_dict.items()],
         "hospital_stats": {
             "names": [x[0] for x in top_hospitals],
             "values": [round(x[1], 1) for x in top_hospitals]
+        },
+        "user_stats": {
+            "names": [x[0] for x in sorted_users],
+            "values": [round(x[1], 1) for x in sorted_users]
         },
         "activity_stats": [{"name": k, "value": round(v, 1)} for k, v in act_dict.items()],
         "opportunity_stats": [{"name": k, "value": round(v, 1)} for k, v in opp_dict.items()]
@@ -351,7 +447,6 @@ def get_hospitals_list(
     page: int = 1, size: int = 20, keyword: str = "", 
     db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)
 ):
-    """分页获取客户列表"""
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="无权访问")
         
@@ -366,22 +461,17 @@ def get_hospitals_list(
     items = query.order_by(models.Hospital.id.desc()).offset((page - 1) * size).limit(size).all()
     return {"total": total, "items": items}
 
-
 @app.post("/api/hospitals/import", tags=["Hospitals"])
 async def import_hospitals(file: UploadFile = File(...), db: Session = Depends(get_db)):
     try:
         contents = await file.read()
-        
-        # 读取 Excel，并把所有 NaN 替换为空字符串
         df = pd.read_excel(io.BytesIO(contents)).fillna("")
         
         success_count = 0
         for index, row in df.iterrows():
-            # 👇 将原来获取中文表头的地方，全部换成与数据库一致的英文字段
             code = str(row.get('code', '')).strip()
             name = str(row.get('name', '')).strip()
             
-            # 核心数据为空则跳过
             if not code or not name:
                 continue
                 
@@ -389,15 +479,23 @@ async def import_hospitals(file: UploadFile = File(...), db: Session = Depends(g
             seg = str(row.get('seg', '')).strip()
             region = str(row.get('region', '')).strip()
             
-            # 写入数据库对象
-            new_hosp = models.Hospital(
-                code=code,
-                name=name,
-                classification=classification if classification else None,
-                seg=seg if seg else None,
-                region=region if region else None
-            )
-            db.merge(new_hosp) 
+            # 使用精准查询判断，防止 UniqueViolation 报错
+            existing_hosp = db.query(models.Hospital).filter(models.Hospital.code == code).first()
+            if existing_hosp:
+                existing_hosp.name = name
+                existing_hosp.classification = classification if classification else None
+                existing_hosp.seg = seg if seg else None
+                existing_hosp.region = region if region else None
+            else:
+                new_hosp = models.Hospital(
+                    code=code,
+                    name=name,
+                    classification=classification if classification else None,
+                    seg=seg if seg else None,
+                    region=region if region else None
+                )
+                db.add(new_hosp)
+                
             success_count += 1
             
         db.commit()
@@ -407,62 +505,143 @@ async def import_hospitals(file: UploadFile = File(...), db: Session = Depends(g
         db.rollback()
         raise HTTPException(status_code=500, detail=f"解析 Excel 失败: {str(e)}")
 
-
 @app.get("/api/hospitals/export", tags=["Hospital"])
 def export_hospitals(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    """一键导出所有客户数据为 Excel"""
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="无权访问")
         
     hospitals = db.query(models.Hospital).all()
-    df = pd.DataFrame([{"code": h.code, "name": h.name, "region": h.region} for h in hospitals])
+    # 增加细分和等级的导出
+    df = pd.DataFrame([{
+        "code": h.code, 
+        "name": h.name, 
+        "region": h.region,
+        "classification": getattr(h, 'classification', ''),
+        "seg": getattr(h, 'seg', '')
+    } for h in hospitals])
     
-    # 将 DataFrame 写入内存中的 Excel 文件
     stream = io.BytesIO()
     with pd.ExcelWriter(stream, engine='openpyxl') as writer:
         df.to_excel(writer, index=False)
     stream.seek(0)
     
-    # 以文件流形式返回给前端下载
     return StreamingResponse(
         stream, 
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=hospitals_export.xlsx"}
     )
 
-@app.get("/api/stats/summary", tags=["System"])
-def get_stats_summary(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    """获取汇总统计数据用于图表展示"""
-    query = db.query(models.ActivityLog)
-    
-    # 权限隔离
-    if current_user.role != "admin":
-        query = query.filter(models.ActivityLog.user_id == current_user.id)
-    
-    logs = query.all()
-    
-    # 1. 统计任务类型分布
-    type_counts = {}
-    for log in logs:
-        if log.activity_types:
-            for t in log.activity_types:
-                type_counts[t] = type_counts.get(t, 0) + 1
-    
-    # 2. 统计客户分布 (取前10)
-    hospital_counts = {}
-    # 获取所有医院名称映射
-    h_map = {h.code: h.name for h in db.query(models.Hospital).all()}
-    for log in logs:
-        name = h_map.get(log.hospital_code, "未知客户")
-        hospital_counts[name] = hospital_counts.get(name, 0) + 1
-    
-    # 排序取前10
-    top_hospitals = sorted(hospital_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+# 文件顶部引入处请确保有 IntegrityError：
+from sqlalchemy.exc import IntegrityError
 
+# ==========================
+# 用户管理接口 (仅限 Admin)
+# ==========================
+
+@app.get("/api/users", tags=["Users"])
+def get_users_list(
+    page: int = 1, size: int = 20, keyword: str = "", 
+    db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)
+):
+    """获取用户列表"""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="无权访问")
+        
+    query = db.query(models.User)
+    if keyword:
+        query = query.filter(
+            (models.User.username.ilike(f"%{keyword}%")) | 
+            (models.User.real_name.ilike(f"%{keyword}%"))
+        )
+        
+    total = query.count()
+    users = query.order_by(models.User.id.desc()).offset((page - 1) * size).limit(size).all()
+    
     return {
-        "type_stats": [{"name": k, "value": v} for k, v in type_counts.items()],
-        "hospital_stats": {
-            "names": [x[0] for x in top_hospitals],
-            "values": [x[1] for x in top_hospitals]
-        }
+        "total": total, 
+        "items": [{
+            "id": u.id, 
+            "username": u.username, 
+            "real_name": u.real_name, 
+            "region": u.region, 
+            "role": u.role
+        } for u in users]
     }
+
+@app.post("/api/users", tags=["Users"])
+def create_user(data: dict, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """创建新用户"""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="无权操作")
+        
+    username = data.get("username", "").strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="登录账号名不能为空")
+        
+    if db.query(models.User).filter(models.User.username == username).first():
+        raise HTTPException(status_code=400, detail="该登录账号已存在，请换一个")
+        
+    new_user = models.User(
+        username=username,
+        password_hash=data.get("password", "123456"), # 默认初始密码为 123456
+        real_name=data.get("real_name", "").strip(),
+        region=data.get("region", "").strip(),
+        role=data.get("role", "user")
+    )
+    db.add(new_user)
+    db.commit()
+    return {"status": "success", "message": "员工账号创建成功！初始密码为：123456"}
+
+@app.put("/api/users/{user_id}", tags=["Users"])
+def update_user(user_id: int, data: dict, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """修改用户信息 / 重置密码"""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="无权操作")
+        
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="未找到该用户")
+        
+    # 如果修改了账号名，检查是否与别人冲突
+    new_username = data.get("username", "").strip()
+    if new_username and new_username != user.username:
+        if db.query(models.User).filter(models.User.username == new_username).first():
+            raise HTTPException(status_code=400, detail="该账号名已被其他员工占用")
+        user.username = new_username
+        
+    if "real_name" in data:
+        user.real_name = data["real_name"].strip()
+    if "region" in data:
+        user.region = data["region"].strip()
+    if "role" in data:
+        user.role = data["role"]
+        
+    # 核心：重置密码功能
+    if data.get("reset_password"):
+        user.password_hash = "123456"
+        
+    db.commit()
+    return {"status": "success", "message": "信息更新成功"}
+
+@app.delete("/api/users/{user_id}", tags=["Users"])
+def delete_user(user_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """删除用户"""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="无权操作")
+        
+    if user_id == current_user.id:
+        raise HTTPException(status_code=400, detail="安全限制：您不能删除正在使用的管理员账号自身")
+        
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="未找到该用户")
+        
+    try:
+        db.delete(user)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        # 防爆机制：如果该员工已经填过工时，数据库外键会阻止删除，这里做友好拦截
+        raise HTTPException(status_code=400, detail="删除失败！该员工已有关联的打卡记录。为保证数据完整，建议您仅将其角色修改或大区改为空。")
+        
+    return {"status": "success", "message": "用户删除成功"}

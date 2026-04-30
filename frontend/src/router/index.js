@@ -42,6 +42,12 @@ const routes = [
         name: 'Hospitals',
         component: () => import('../views/Hospitals.vue'),
         meta: { title: '客户管理', requiresAdmin: true }
+      },
+      {
+        path: '/users',
+        name: 'UserManage',
+        component: () => import('../views/UserManage.vue'),
+        meta: { requiresAuth: true, role: 'admin' } // 确保只有管理员可进入
       }
     ]
   }

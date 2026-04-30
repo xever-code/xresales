@@ -7,6 +7,15 @@
         </div>
       </template>
 
+      <el-alert
+        v-if="isMaintenance && role !== 'admin'"
+        title="系统维护中，暂停工时录入，请稍后再试。"
+        type="warning"
+        show-icon
+        :closable="false"
+        style="margin-bottom: 20px;"
+      />
+
       <el-form 
         ref="formRef"
         :model="form" 
@@ -103,7 +112,14 @@
         </el-form-item>
 
         <div class="action-bar">
-          <el-button type="primary" size="large" class="submit-btn" :loading="submitting" @click="submitLog">
+          <el-button 
+            type="primary" 
+            size="large" 
+            class="submit-btn" 
+            :loading="submitting" 
+            :disabled="isMaintenance && role !== 'admin'"
+            @click="submitLog"
+          >
             🚀 提 交 工 作 记 录
           </el-button>
         </div>
@@ -116,6 +132,10 @@
 import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import request from '../api/request'
+
+// 👇 新增：获取角色信息以区分是否禁言
+const role = ref(localStorage.getItem('role') || 'user')
+const isMaintenance = ref(false)
 
 // --- 状态数据 ---
 const formRef = ref(null)
@@ -144,19 +164,23 @@ const rules = {
   purpose: [{ required: true, message: '请填写活动目的', trigger: 'blur' }]
 }
 
-// ==========================================
-// 🚀 时间联动与锁定逻辑
-// ==========================================
+// 👇 新增：查询系统维护状态
+const fetchMaintenanceStatus = async () => {
+  try {
+    const res = await request.get('/system/maintenance')
+    isMaintenance.value = res.is_maintenance
+  } catch (err) {
+    console.error('获取系统状态失败')
+  }
+}
 
 // 1. 监听开始时间的改变
 const handleStartTimeChange = (val) => {
   if (!val) {
-    // 如果清空了开始时间，连带清空结束时间
     form.value.visit_time_end = ''
     return
   }
   
-  // 如果结束时间已经填了，但用户又改了开始日期，自动把结束日期同步过去（保留时分秒）
   if (form.value.visit_time_end) {
     const newStartDate = val.split(' ')[0]
     const oldEndTime = form.value.visit_time_end.split(' ')[1]
@@ -164,25 +188,24 @@ const handleStartTimeChange = (val) => {
   }
 }
 
-// 2. 锁定结束时间面板，禁用非开始日期的所有天数
+// 2. 锁定结束时间面板
 const disabledEndDate = (time) => {
-  if (!form.value.visit_time_start) return false // 理论上选不到这，因为 input 被 disabled 了
+  if (!form.value.visit_time_start) return false 
   
-  // 提取开始日期的部分并归零时间
   const startDateStr = form.value.visit_time_start.split(' ')[0]
   const startDate = new Date(startDateStr.replace(/-/g, '/'))
   startDate.setHours(0, 0, 0, 0)
 
-  // 待校验的面板日期
   const checkDate = new Date(time)
   checkDate.setHours(0, 0, 0, 0)
 
-  // 返回 true 表示禁用该天。如果不是同一天，就禁用。
   return startDate.getTime() !== checkDate.getTime()
 }
 
 // --- 初始化与获取字典配置 ---
 onMounted(async () => {
+  fetchMaintenanceStatus() // 检查是否处于维护状态
+  
   try {
     const res = await request.get('/configs')
     configs.value = res
@@ -214,10 +237,6 @@ const submitLog = async () => {
   
   await formRef.value.validate(async (valid) => {
     if (valid) {
-      
-      // ==========================================
-      // 🚀 智能跨天时间处理逻辑 (依然生效)
-      // ==========================================
       let tStart = new Date(form.value.visit_time_start.replace(/-/g, '/')).getTime()
       let tEnd = new Date(form.value.visit_time_end.replace(/-/g, '/')).getTime()
 
@@ -226,7 +245,6 @@ const submitLog = async () => {
         let endDate = form.value.visit_time_end.split(' ')[0]
 
         if (startDate === endDate) {
-          // 自动将结束时间顺延 24 小时
           let nextDay = new Date(tEnd + 24 * 60 * 60 * 1000)
           const y = nextDay.getFullYear()
           const m = String(nextDay.getMonth() + 1).padStart(2, '0')
@@ -253,7 +271,7 @@ const submitLog = async () => {
         form.value.next_step = ''
         hospitalOptions.value = []
       } catch (error) {
-        // request.js 会统一处理错误提示
+        // request.js 统一处理拦截和错误
       } finally {
         submitting.value = false
       }
@@ -304,7 +322,6 @@ const submitLog = async () => {
   flex: 1;
 }
 
-/* 触屏优化的 Checkbox 样式 */
 .touch-checkbox-group .el-checkbox {
   margin-right: 10px;
   margin-bottom: 10px;
@@ -314,7 +331,6 @@ const submitLog = async () => {
   background-color: #ecf5ff;
 }
 
-/* --- 响应式设计 --- */
 @media screen and (max-width: 768px) {
   .form-card {
     border: none;
@@ -327,7 +343,6 @@ const submitLog = async () => {
     gap: 0;
   }
 
-  /* 移动端吸底操作栏 */
   .action-bar {
     position: fixed;
     bottom: 0;
@@ -348,7 +363,6 @@ const submitLog = async () => {
   }
 }
 
-/* PC 端的按钮样式 */
 @media screen and (min-width: 769px) {
   .action-bar {
     margin-top: 30px;

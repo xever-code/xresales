@@ -4,14 +4,24 @@
       <template #header>
         <div class="card-header">
           <span>📜 系统更新日志</span>
-          <el-tag type="success" effect="dark" round>当前版本：v1.0.2</el-tag>
+          <el-tag type="success" effect="dark" round>当前版本：v1.0.3</el-tag>
         </div>
       </template>
 
       <el-timeline>
-        <el-timeline-item timestamp="2026-04-20" placement="top" type="success" size="large">
+        <el-timeline-item timestamp="2026-04-30" placement="top" type="success" size="large">
           <el-card shadow="hover">
-            <h3>v1.0.2 <el-tag size="small" type="success" style="margin-left: 8px">Update</el-tag></h3>
+            <h3>v1.0.3 <el-tag size="small" type="success" style="margin-left: 8px">Update</el-tag></h3>
+            <ul>
+              <li><strong>[新增]</strong> 增加了编辑工时记录的功能，支持在日志列表中快捷修改拜访客户与时间。</li>
+              <li><strong>[优化]</strong> 修改了统计分析的图表呈现，优化了客户名称显示，并支持图表下载与 Top3 客户明细导出。</li>
+            </ul>
+          </el-card>
+        </el-timeline-item>
+
+        <el-timeline-item timestamp="2026-04-20" placement="top" color="#909399" size="large">
+          <el-card shadow="hover" class="old-version">
+            <h3>v1.0.2 <el-tag size="small" type="success" style="margin-left: 8px" effect="plain">Update</el-tag></h3>
             <ul>
               <li><strong>[更正]</strong> 更正工时输入，不再支持跨天填写工时。</li>
               <li><strong>[新增]</strong> 增加统计分析页面，可以查看自己输入工时的情况。</li>
@@ -19,9 +29,9 @@
           </el-card>
         </el-timeline-item>
 
-        <el-timeline-item timestamp="2026-04-10" placement="top" type="warning" size="large">
+        <el-timeline-item timestamp="2026-04-10" placement="top" color="#909399" size="large">
           <el-card shadow="hover" class="old-version">
-            <h3>v1.0.1-beta <el-tag size="small" type="warning" style="margin-left: 8px">Beta</el-tag></h3>
+            <h3>v1.0.1-beta <el-tag size="small" type="warning" style="margin-left: 8px" effect="plain">Beta</el-tag></h3>
             <ul>
               <li><strong>[适配]</strong> 增加了移动端的适配，优化了手机端的交互体验。</li>
               <li><strong>[调整]</strong> 暂时下线了 AI 智能解析录入功能。</li>
@@ -32,7 +42,7 @@
 
         <el-timeline-item timestamp="2026-04-01" placement="top" color="#909399">
           <el-card shadow="hover" class="old-version">
-            <h3>v1.0.0 <el-tag size="small" type="info" style="margin-left: 8px">Initial Release</el-tag></h3>
+            <h3>v1.0.0 <el-tag size="small" type="info" style="margin-left: 8px" effect="plain">Initial Release</el-tag></h3>
             <p>IT 售前工作录入系统正式环境搭建完成，基础数据迁移入库。</p>
           </el-card>
         </el-timeline-item>

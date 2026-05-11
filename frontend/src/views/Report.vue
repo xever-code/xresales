@@ -156,42 +156,56 @@ const updateCharts = (data) => {
 
   const [regionChart, userChart, hospChart, actChart, oppChart] = charts
 
-  // 1. 各区工时汇总
-  let regionStats = [...(data.region_stats || [])];
-  if (selectedRegion.value === 'exclude_central') {
-    regionStats = regionStats.filter(i => i.name.toLowerCase() !== 'central');
-  }
-  regionStats.sort((a, b) => b.value - a.value);
-
+  // 1. 各区工时汇总 (改为左右对比柱状图)
   regionChart.setOption({
-    title: { text: '🌍 各区工时投入汇总', left: 'center' },
+    title: { text: '🌍 各区工时投入对比 (售前 vs 售后)', left: 'center' },
     toolbox: commonToolbox,
-    tooltip: { trigger: 'axis' },
-    xAxis: { type: 'category', data: regionStats.map(i => i.name), axisLabel: { interval: 0 } },
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    legend: { data: ['售前工时', '售后工时'], top: 30 },
+    xAxis: { type: 'category', data: data.region_stats.names, axisLabel: { interval: 0 } },
     yAxis: { type: 'value', name: '小时' },
-    series: [{
-      type: 'bar', data: regionStats.map(i => i.value),
-      label: { show: true, position: 'top' },
-      itemStyle: { color: '#409EFF' },
-      barMaxWidth: 60
-    }]
+    series: [
+      {
+        name: '售前工时', type: 'bar', data: data.region_stats.presales,
+        itemStyle: { color: '#409EFF' }, barMaxWidth: 40,
+        label: { show: true, position: 'top', formatter: (p) => p.value > 0 ? p.value : '' }
+      },
+      {
+        name: '售后工时', type: 'bar', data: data.region_stats.aftersales,
+        itemStyle: { color: '#E6A23C' }, barMaxWidth: 40,
+        label: { show: true, position: 'top', formatter: (p) => p.value > 0 ? p.value : '' }
+      }
+    ]
   })
 
-  // 2. 员工排行
+  // 2. 员工排行 (改为左右对比柱状图)
   if (data.user_stats) {
     userChart.setOption({
-      title: { text: '🏆 员工工时投入排行', left: 'center' },
+      title: { text: '🏆 员工工时投入对比', left: 'center' },
       toolbox: commonToolbox,
-      tooltip: { trigger: 'axis' },
+      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+      legend: { data: ['售前工时', '售后工时'], top: 30 },
       xAxis: { type: 'category', data: data.user_stats.names, axisLabel: { interval: 0, rotate: 30 } },
       yAxis: { type: 'value', name: '小时' },
-      series: [{
-        type: 'bar', data: data.user_stats.values,
-        label: { show: true, position: 'top' },
-        itemStyle: { color: '#67C23A' }
-      }]
+      series: [
+        {
+          name: '售前工时', type: 'bar', data: data.user_stats.presales,
+          itemStyle: { color: '#67C23A' }, barMaxWidth: 40,
+          label: { show: true, position: 'top', formatter: (p) => p.value > 0 ? p.value : '' }
+        },
+        {
+          name: '售后工时', type: 'bar', data: data.user_stats.aftersales,
+          itemStyle: { color: '#E6A23C' }, barMaxWidth: 40,
+          label: { show: true, position: 'top', formatter: (p) => p.value > 0 ? p.value : '' }
+        }
+      ]
     })
   }
+
+  // ----------------------------------------------------
+  // 注意：下面 3.客户投入、4.任务类型、5.业务机会 的代码完全不用动！
+  // 保持原有代码不变即可。
+  // ----------------------------------------------------
 
   // 3. 客户投入
   let hospNames = data.hospital_stats?.names || [];

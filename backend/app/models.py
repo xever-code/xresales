@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Float
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import declarative_base, relationship
 
@@ -56,3 +56,16 @@ class ActivityLog(Base):
 
     # ORM 关联属性
     user = relationship("User", back_populates="logs")
+
+# 👇 放在 models.py 的最末尾
+class AfterSalesLog(Base):
+    __tablename__ = "after_sales_logs"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    technician_name = Column(String(100), index=True) # 对应：执行姓名
+    service_hours = Column(Float)                     # 对应：服务时长
+    hospital_name = Column(String(255))               # 对应：客户名
+    region = Column(String(100))                      # 对应：SI区域
+    work_order = Column(String(100))                  # 对应：Work Order Number
+    start_time = Column(DateTime)                     # 对应：Start Date and Time
+    end_time = Column(DateTime)                       # 对应：End Date and Time

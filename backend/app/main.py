@@ -353,38 +353,37 @@ def get_stats_summary(
     db: Session = Depends(get_db), 
     current_user: models.User = Depends(get_current_user)
 ):
-    query = db.query(models.ActivityLog, models.Hospital, models.User).outerjoin(
+    # ---------------- 1. 查询售前数据 ----------------
+    pre_query = db.query(models.ActivityLog, models.Hospital, models.User).outerjoin(
         models.Hospital, models.ActivityLog.hospital_code == models.Hospital.code
     ).outerjoin(
         models.User, models.ActivityLog.user_id == models.User.id
     )
     
     if current_user.role != "admin":
-        query = query.filter(models.ActivityLog.user_id == current_user.id)
+        pre_query = pre_query.filter(models.ActivityLog.user_id == current_user.id)
         
     if start_date:
-        query = query.filter(models.ActivityLog.visit_time_start >= start_date)
+        pre_query = pre_query.filter(models.ActivityLog.visit_time_start >= start_date)
     if end_date:
         end_dt = f"{end_date} 23:59:59" if len(end_date) == 10 else end_date
-        query = query.filter(models.ActivityLog.visit_time_start <= end_dt)
+        pre_query = pre_query.filter(models.ActivityLog.visit_time_start <= end_dt)
         
-    # 👇 修改点：支持特殊筛选“exclude_central”
     if region:
         if region == "exclude_central":
-            # 排除 Central 大区的所有数据
-            query = query.filter(func.lower(models.User.region) != 'central')
+            pre_query = pre_query.filter(func.lower(models.User.region) != 'central')
         else:
-            query = query.filter(models.User.region == region)
+            pre_query = pre_query.filter(models.User.region == region)
         
-    results = query.all()
+    pre_results = pre_query.all()
     
-    region_dict = {}
+    pre_region = {}
+    pre_user = {} 
     hospital_dict = {}
     act_dict = {}
     opp_dict = {}
-    user_dict = {} 
     
-    for log, hosp, user in results:
+    for log, hosp, user in pre_results:
         u_region = user.region if user and user.region else "未知大区"
         if u_region.lower() == 'system':
             continue
@@ -394,45 +393,82 @@ def get_stats_summary(
             delta = log.visit_time_end - log.visit_time_start
             hours = delta.total_seconds() / 3600.0
             
-        if hours <= 0:
-            continue
+        if hours <= 0: continue
 
-        # 统计大区、客户等（保持不变）
-        region_dict[u_region] = region_dict.get(u_region, 0) + hours
+        pre_region[u_region] = pre_region.get(u_region, 0) + hours
+        
+        # 仅售前参与排行的指标
         h_name = hosp.name if hosp else "未知客户"
         hospital_dict[h_name] = hospital_dict.get(h_name, 0) + hours
         
-        # 👇 核心修改：统计员工工时时使用 real_name
-        # 逻辑：优先取 log 里的 real_name，如果没有则取 user_name 兜底
+        if log.activity_types:
+            for t in log.activity_types: act_dict[t] = act_dict.get(t, 0) + hours
+        if log.opportunities:
+            for o in log.opportunities: opp_dict[o] = opp_dict.get(o, 0) + hours
+            
         u_display_name = log.real_name if log.real_name else (log.user_name or "未知员工")
-        
-        # 过滤掉“未知员工”或空名字，保证图表美观
         if not u_display_name.strip() or u_display_name == "未知员工":
             continue
-            
-        user_dict[u_display_name] = user_dict.get(u_display_name, 0) + hours
+        pre_user[u_display_name] = pre_user.get(u_display_name, 0) + hours
+
+    # ---------------- 2. 查询售后数据 (通过名字匹配员工表以规范大区) ----------------
+    aft_query = db.query(models.AfterSalesLog, models.User).outerjoin(
+        models.User, models.AfterSalesLog.technician_name == models.User.real_name
+    )
+    if current_user.role != "admin":
+        aft_query = aft_query.filter(models.AfterSalesLog.technician_name == current_user.real_name)
         
-        # 统计任务类型和机会（保持不变）
-        if log.activity_types:
-            for t in log.activity_types:
-                act_dict[t] = act_dict.get(t, 0) + hours
-        if log.opportunities:
-            for o in log.opportunities:
-                opp_dict[o] = opp_dict.get(o, 0) + hours
-                
-    # 排序并返回（保持不变）
+    if start_date:
+        aft_query = aft_query.filter(models.AfterSalesLog.start_time >= start_date)
+    if end_date:
+        end_dt = f"{end_date} 23:59:59" if len(end_date) == 10 else end_date
+        aft_query = aft_query.filter(models.AfterSalesLog.start_time <= end_dt)
+        
+    if region:
+        if region == "exclude_central":
+            aft_query = aft_query.filter(func.lower(models.User.region) != 'central')
+        else:
+            aft_query = aft_query.filter(models.User.region == region)
+            
+    aft_results = aft_query.all()
+    aft_region = {}
+    aft_user = {}
+    
+    for alog, user in aft_results:
+        # 使用系统中匹配到的大区规范数据
+        u_region = user.region if user and user.region else "未知大区"
+        if u_region.lower() == 'system':
+            continue
+            
+        aft_region[u_region] = aft_region.get(u_region, 0) + alog.service_hours
+        
+        u_name = alog.technician_name if alog.technician_name else "未知员工"
+        aft_user[u_name] = aft_user.get(u_name, 0) + alog.service_hours
+
+    # ---------------- 3. 合并数据，供前端渲染堆叠柱状图 ----------------
+    def merge_dicts(d1, d2):
+        keys = set(d1.keys()) | set(d2.keys())
+        combined = {k: d1.get(k, 0) + d2.get(k, 0) for k in keys}
+        sorted_keys = sorted(combined.items(), key=lambda x: x[1], reverse=True)
+        names = [x[0] for x in sorted_keys]
+        return {
+            "names": names,
+            "presales": [round(d1.get(n, 0), 1) for n in names],
+            "aftersales": [round(d2.get(n, 0), 1) for n in names]
+        }
+
+    merged_region = merge_dicts(pre_region, aft_region)
+    merged_user = merge_dicts(pre_user, aft_user)
+    
+    # 医院排行榜只返回单纯的数值数组（因为只有售前）
     top_hospitals = sorted(hospital_dict.items(), key=lambda x: x[1], reverse=True)[:10]
-    sorted_users = sorted(user_dict.items(), key=lambda x: x[1], reverse=True)
 
     return {
-        "region_stats": [{"name": k, "value": round(v, 1)} for k, v in region_dict.items()],
+        "region_stats": merged_region,
+        "user_stats": merged_user,
         "hospital_stats": {
             "names": [x[0] for x in top_hospitals],
             "values": [round(x[1], 1) for x in top_hospitals]
-        },
-        "user_stats": {
-            "names": [x[0] for x in sorted_users],
-            "values": [round(x[1], 1) for x in sorted_users]
         },
         "activity_stats": [{"name": k, "value": round(v, 1)} for k, v in act_dict.items()],
         "opportunity_stats": [{"name": k, "value": round(v, 1)} for k, v in opp_dict.items()]
@@ -504,6 +540,78 @@ async def import_hospitals(file: UploadFile = File(...), db: Session = Depends(g
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"解析 Excel 失败: {str(e)}")
+    
+# ==========================
+# 售后工时导入接口 (仅限 Admin)
+# ==========================
+@app.post("/api/aftersales/import", tags=["AfterSales"])
+async def import_aftersales(file: UploadFile = File(...), db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可导入售后数据")
+        
+    try:
+        contents = await file.read()
+        if file.filename.endswith('.csv'):
+            try:
+                df = pd.read_csv(io.BytesIO(contents), encoding='utf-8')
+            except UnicodeDecodeError:
+                df = pd.read_csv(io.BytesIO(contents), encoding='gbk')
+        else:
+            df = pd.read_excel(io.BytesIO(contents))
+            
+        df = df.fillna("")
+        
+        # 👇 新增：一个非常健壮的时间解析函数
+        def parse_excel_date(val):
+            val_str = str(val).strip()
+            if not val_str:
+                return None
+            try:
+                # 尝试作为 Excel 序列号处理（例如 46146.0833）
+                # Excel 序列号是以 1899-12-30 为起点的天数
+                f_val = float(val_str)
+                return pd.to_datetime(f_val, unit='D', origin='1899-12-30')
+            except ValueError:
+                # 如果转 float 报错，说明它是普通的文本时间（例如 "2026-05-01 10:00:00"）
+                return pd.to_datetime(val_str)
+
+        success_count = 0
+        for index, row in df.iterrows():
+            tech_name = str(row.get('执行姓名', '')).strip()
+            hours_str = str(row.get('服务时长', '0')).strip()
+            
+            if not tech_name or not hours_str:
+                continue
+                
+            try:
+                hours = float(hours_str)
+            except ValueError:
+                hours = 0.0
+                
+            if hours <= 0:
+                continue
+                
+            # 👇 修改：使用刚才写好的函数来解析开始和结束时间
+            start_time = parse_excel_date(row.get('Start Date and Time', ''))
+            end_time = parse_excel_date(row.get('End Date and Time', ''))
+
+            log = models.AfterSalesLog(
+                technician_name=tech_name,
+                service_hours=hours,
+                hospital_name=str(row.get('客户名', '')).strip(),
+                region=str(row.get('SI区域', '')).strip(),
+                work_order=str(row.get('Work Order Number', '')).strip(),
+                start_time=start_time,
+                end_time=end_time
+            )
+            db.add(log)
+            success_count += 1
+            
+        db.commit()
+        return {"status": "success", "message": f"成功导入 {success_count} 条售后工时数据！"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"文件解析失败: {str(e)}")
 
 @app.get("/api/hospitals/export", tags=["Hospital"])
 def export_hospitals(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):

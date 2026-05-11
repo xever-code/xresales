@@ -4,15 +4,28 @@
       <template #header>
         <div class="card-header">
           <span>📊 统计分析与历史记录</span>
-          <div>
+          <div style="display: flex; align-items: center; gap: 15px;">
             <el-switch
               v-if="role === 'admin'"
               v-model="isMaintenance"
               active-text="系统维护模式 (暂停录入)"
               active-color="#ff4949"
               @change="handleMaintenanceToggle"
-              style="margin-right: 20px;"
             />
+            
+            <el-upload
+              v-if="role === 'admin'"
+              action="/api/aftersales/import"
+              :headers="uploadHeaders"
+              :show-file-list="false"
+              :on-success="handleUploadSuccess"
+              :on-error="handleUploadError"
+              accept=".xlsx, .xls, .csv"
+              style="display: flex; align-items: center;"
+            >
+              <el-button type="warning" plain :icon="Upload">导入售后工时</el-button>
+            </el-upload>
+
             <el-button type="success" :icon="Download" @click="exportExcel">导出 Excel</el-button>
           </div>
         </div>
@@ -140,9 +153,9 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue' // 👈 加入 computed
 import { ElMessage } from 'element-plus'
-import { Download, Search } from '@element-plus/icons-vue'
+import { Download, Search, Upload } from '@element-plus/icons-vue'  // 👈 加上 Upload 图标
 import request from '../api/request'
 
 const role = ref(localStorage.getItem('role') || 'user')
@@ -156,6 +169,28 @@ const filterRegion = ref('')
 const filterUserName = ref('')
 const regionOptions = ref([])
 const isMaintenance = ref(false)
+
+// 👇 新增：用于导入的文件头和回调逻辑
+const uploadHeaders = computed(() => ({
+  Authorization: `Bearer ${localStorage.getItem('access_token')}`
+}))
+
+const handleUploadSuccess = (res) => {
+  if (res.status === 'success') {
+    ElMessage.success(res.message || '售后工时导入成功！')
+  } else {
+    ElMessage.error('导入出现异常')
+  }
+}
+
+const handleUploadError = (err) => {
+  try {
+    const errorMsg = JSON.parse(err.message).detail
+    ElMessage.error(`导入失败: ${errorMsg}`)
+  } catch (e) {
+    ElMessage.error('导入失败，请检查文件格式或网络')
+  }
+}
 
 // ===================================
 // 新增：编辑功能相关的状态与逻辑

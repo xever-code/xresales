@@ -26,6 +26,10 @@ class LogCreate(BaseModel):
     next_step: Optional[str] = Field(default="", description="下一步计划")
     opportunities: List[str] = Field(default=[], description="新业务机会")
 
+    # 👇 新增接收这两个布尔值字段（默认为 False）
+    is_handover: Optional[bool] = False
+    handover_travel: Optional[bool] = False
+
     class Config:
         # 允许传入比模型定义更多的字段（兼容前端可能传多的情况）
         extra = "ignore"

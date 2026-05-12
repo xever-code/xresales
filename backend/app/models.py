@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Float
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Float, Boolean
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import declarative_base, relationship
 
@@ -49,10 +49,16 @@ class ActivityLog(Base):
     activity_types = Column(JSONB) # 强类型 JSON 存储
     next_step = Column(Text)
     opportunities = Column(JSONB)
+
+    # 👇 新增交接和差旅标签
+    is_handover = Column(Boolean, default=False)
+    handover_travel = Column(Boolean, default=False)
     
     # 👇 新增下面这两行映射数据库的新字段
     real_name = Column(String(100))
     created_at = Column(DateTime)
+
+    
 
     # ORM 关联属性
     user = relationship("User", back_populates="logs")

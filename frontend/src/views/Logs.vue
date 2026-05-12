@@ -13,6 +13,10 @@
               @change="handleMaintenanceToggle"
             />
             
+            <el-tag v-if="role === 'admin'" type="warning" effect="plain" style="margin-right: -5px;">
+              已存售后记录: {{ aftersalesTotal }} 条
+            </el-tag>
+
             <el-upload
               v-if="role === 'admin'"
               action="/api/aftersales/import"
@@ -65,7 +69,13 @@
         </el-table-column>
 
         <el-table-column prop="purpose" label="交流目的" min-width="200" show-overflow-tooltip />
-
+        <el-table-column label="交接/差旅" width="110" align="center">
+          <template #default="scope">
+            <el-tag v-if="scope.row.is_handover" type="warning" size="small" style="margin-bottom: 4px;">涉及交接</el-tag>
+            <el-tag v-if="scope.row.handover_travel" type="danger" size="small">产生差旅</el-tag>
+            <span v-if="!scope.row.is_handover && !scope.row.handover_travel" style="color: #ccc;">-</span>
+          </template>
+        </el-table-column>
         <el-table-column label="任务类型" min-width="150">
           <template #default="{ row }">
             <template v-if="row.activity_types && row.activity_types.length > 0">
@@ -169,6 +179,8 @@ const filterRegion = ref('')
 const filterUserName = ref('')
 const regionOptions = ref([])
 const isMaintenance = ref(false)
+ 
+const aftersalesTotal = ref(0) // 👈 新增：存储售后总数
 
 // 👇 新增：用于导入的文件头和回调逻辑
 const uploadHeaders = computed(() => ({
@@ -178,6 +190,7 @@ const uploadHeaders = computed(() => ({
 const handleUploadSuccess = (res) => {
   if (res.status === 'success') {
     ElMessage.success(res.message || '售后工时导入成功！')
+    fetchData() // 👈 新增：上传成功后重新获取最新条数
   } else {
     ElMessage.error('导入出现异常')
   }
@@ -316,6 +329,7 @@ const fetchData = async () => {
     const res = await request.get('/logs', { params })
     tableData.value = res.items
     total.value = res.total
+    aftersalesTotal.value = res.aftersales_total || 0 // 👈 新增：赋值给响应式变量
   } catch (error) {
     console.error('获取日志失败:', error)
   } finally {

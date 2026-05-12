@@ -160,7 +160,11 @@ def create_log(log_data: schemas.LogCreate, db: Session = Depends(get_db), curre
         purpose=log_data.purpose,
         activity_types=log_data.activity_types,
         next_step=log_data.next_step,
-        opportunities=log_data.opportunities
+        opportunities=log_data.opportunities,
+
+        # 👇 加上新增的这俩兄弟
+        is_handover=log_data.is_handover,
+        handover_travel=log_data.handover_travel
     )
     
     db.add(new_log)
@@ -255,7 +259,20 @@ def get_logs(
         log_dict["real_name"] = user_real_name if user_real_name else log.user_name 
         formatted_logs.append(log_dict)
     
-    return {"total": total, "items": formatted_logs}
+    # ===============================
+    # 👇 新增：统计售后记录的总条数
+    # ===============================
+    aft_query = db.query(models.AfterSalesLog)
+    if current_user.role != "admin":
+        aft_query = aft_query.filter(models.AfterSalesLog.technician_name == current_user.real_name)
+    aftersales_total = aft_query.count()
+
+    # 👇 修改 return，把 aftersales_total 传给前端
+    return {
+        "total": total, 
+        "items": formatted_logs, 
+        "aftersales_total": aftersales_total
+    }
 
 @app.get("/api/logs/export", tags=["Activity"])
 def export_logs(
@@ -321,6 +338,9 @@ def export_logs(
             "交流目的": log.purpose,
             "任务类型": "、".join(log.activity_types) if log.activity_types else "",
             "业务机会": "、".join(log.opportunities) if log.opportunities else "",
+            # 👇 新增导出列
+            "涉及职责交接": "是" if log.is_handover else "否",
+            "交接产生差旅": "是" if log.handover_travel else "否",
             "下一步计划": log.next_step
         })
         
@@ -561,24 +581,23 @@ async def import_aftersales(file: UploadFile = File(...), db: Session = Depends(
             
         df = df.fillna("")
         
-        # 👇 新增：一个非常健壮的时间解析函数
         def parse_excel_date(val):
             val_str = str(val).strip()
             if not val_str:
                 return None
             try:
-                # 尝试作为 Excel 序列号处理（例如 46146.0833）
-                # Excel 序列号是以 1899-12-30 为起点的天数
                 f_val = float(val_str)
                 return pd.to_datetime(f_val, unit='D', origin='1899-12-30')
             except ValueError:
-                # 如果转 float 报错，说明它是普通的文本时间（例如 "2026-05-01 10:00:00"）
                 return pd.to_datetime(val_str)
 
         success_count = 0
+        skip_count = 0
+        
         for index, row in df.iterrows():
             tech_name = str(row.get('执行姓名', '')).strip()
             hours_str = str(row.get('服务时长', '0')).strip()
+            work_order = str(row.get('Work Order Number', '')).strip()
             
             if not tech_name or not hours_str:
                 continue
@@ -590,17 +609,31 @@ async def import_aftersales(file: UploadFile = File(...), db: Session = Depends(
                 
             if hours <= 0:
                 continue
-                
-            # 👇 修改：使用刚才写好的函数来解析开始和结束时间
+
             start_time = parse_excel_date(row.get('Start Date and Time', ''))
             end_time = parse_excel_date(row.get('End Date and Time', ''))
+
+            # 👇 核心：按照 工单号 + 姓名 + 开始时间 进行联合校验
+            if work_order and start_time:
+                existing_log = db.query(models.AfterSalesLog).filter(
+                    models.AfterSalesLog.work_order == work_order,
+                    models.AfterSalesLog.technician_name == tech_name,
+                    models.AfterSalesLog.start_time == start_time
+                ).first()
+                
+                if existing_log:
+                    # 已存在则更新时长和结束时间，跳过新增
+                    existing_log.service_hours = hours
+                    existing_log.end_time = end_time
+                    skip_count += 1
+                    continue
 
             log = models.AfterSalesLog(
                 technician_name=tech_name,
                 service_hours=hours,
                 hospital_name=str(row.get('客户名', '')).strip(),
                 region=str(row.get('SI区域', '')).strip(),
-                work_order=str(row.get('Work Order Number', '')).strip(),
+                work_order=work_order,
                 start_time=start_time,
                 end_time=end_time
             )
@@ -608,7 +641,10 @@ async def import_aftersales(file: UploadFile = File(...), db: Session = Depends(
             success_count += 1
             
         db.commit()
-        return {"status": "success", "message": f"成功导入 {success_count} 条售后工时数据！"}
+        return {
+            "status": "success", 
+            "message": f"导入完成！新增 {success_count} 条，更新已存在的记录 {skip_count} 条。"
+        }
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"文件解析失败: {str(e)}")

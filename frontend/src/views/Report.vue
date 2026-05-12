@@ -107,10 +107,62 @@ const oppChartRef = ref(null)
 
 let charts = []
 
-const commonToolbox = {
-  show: true,
-  feature: { saveAsImage: { title: '下载', pixelRatio: 2 } }
+// ----------------------------------------------------
+// 👇 替换为：统一高清导出逻辑 (1600 x 800)
+// ----------------------------------------------------
+const exportHighResChart = (chartInstance, fileName) => {
+  // 1. 创建隐藏的临时容器，强制设定物理尺寸为 1600x800
+  const hiddenDiv = document.createElement('div')
+  hiddenDiv.style.width = '1600px'
+  hiddenDiv.style.height = '800px'
+  hiddenDiv.style.position = 'absolute'
+  hiddenDiv.style.left = '-9999px'
+  hiddenDiv.style.visibility = 'hidden'
+  document.body.appendChild(hiddenDiv)
+
+  // 2. 初始化临时大尺寸图表，并拷贝原图表的配置
+  const tempChart = echarts.init(hiddenDiv)
+  const option = chartInstance.getOption()
+  
+  // 去除动画以加快渲染，并移除右上角的下载工具栏（以免出现在截图里）
+  option.animation = false
+  if (option.toolbox) option.toolbox = []
+  
+  // 稍微放大标题字体以适配 1600 宽的大屏
+  if (option.title && option.title.length > 0) {
+    option.title[0].textStyle = { ...option.title[0].textStyle, fontSize: 22 }
+  }
+
+  tempChart.setOption(option)
+
+  // 3. 延迟 500ms 等待 ECharts 渲染完成后，触发高清下载
+  setTimeout(() => {
+    const url = tempChart.getDataURL({ type: 'png', pixelRatio: 1, backgroundColor: '#fff' })
+    const link = document.createElement('a')
+    link.download = `${fileName}_${new Date().toISOString().split('T')[0]}.png`
+    link.href = url
+    link.click()
+
+    // 4. 清理内存和 DOM 垃圾
+    tempChart.dispose()
+    document.body.removeChild(hiddenDiv)
+  }, 500)
 }
+
+// 动态生成带有自定义下载功能的 toolbox
+const getCustomToolbox = (chartInstance, fileName) => ({
+  show: true,
+  feature: {
+    myDownload: {
+      show: true,
+      title: '统一尺寸高清下载 (1600x800)',
+      // 使用标准的下载 Icon
+      icon: 'path://M4.7,22.9L29.3,22.9C30.6,22.9 31.6,21.8 31.6,20.5L31.6,15.8L26.9,15.8L26.9,18.2L9.4,18.2L9.4,15.8L4.7,15.8L4.7,20.5C4.7,21.8 5.7,22.9 7.1,22.9L4.7,22.9ZM16.9,18.2L26.3,8.8L23.0,5.5L19.3,9.2L19.3,0.0L14.6,0.0L14.6,9.2L10.9,5.5L7.6,8.8L16.9,18.2Z',
+      onclick: () => exportHighResChart(chartInstance, fileName)
+    }
+  }
+})
+// ----------------------------------------------------
 
 const fetchRegions = async () => {
   if (role.value === 'admin') {
@@ -156,10 +208,11 @@ const updateCharts = (data) => {
 
   const [regionChart, userChart, hospChart, actChart, oppChart] = charts
 
+
   // 1. 各区工时汇总 (改为左右对比柱状图)
   regionChart.setOption({
     title: { text: '🌍 各区工时投入对比 (售前 vs 售后)', left: 'center' },
-    toolbox: commonToolbox,
+    toolbox: getCustomToolbox(regionChart, '大区工时投入对比'),
     tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
     legend: { data: ['售前工时', '售后工时'], top: 30 },
     xAxis: { type: 'category', data: data.region_stats.names, axisLabel: { interval: 0 } },
@@ -182,7 +235,7 @@ const updateCharts = (data) => {
   if (data.user_stats) {
     userChart.setOption({
       title: { text: '🏆 员工工时投入对比', left: 'center' },
-      toolbox: commonToolbox,
+      toolbox: getCustomToolbox(userChart, '员工工时投入排行'),
       tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
       legend: { data: ['售前工时', '售后工时'], top: 30 },
       xAxis: { type: 'category', data: data.user_stats.names, axisLabel: { interval: 0, rotate: 30 } },
@@ -224,7 +277,7 @@ const updateCharts = (data) => {
   currentTopHospitals.value = [...hospNames].reverse();
 
   hospChart.setOption({
-    toolbox: commonToolbox,
+    toolbox: getCustomToolbox(hospChart, 'Top客户工时投入'),
     tooltip: { trigger: 'axis' },
     grid: { left: '3%', right: '10%', bottom: '3%', containLabel: true },
     xAxis: { type: 'value', name: '小时' },
@@ -300,26 +353,67 @@ const exportTop3Hospitals = async () => {
   }
 }
 
-// 拼接下载饼图
+// 拼接下载饼图 (升级为原生高清重绘，完美统一 1600x800)
 const downloadCombinedPies = () => {
-  const canvas1 = actChartRef.value.querySelector('canvas');
-  const canvas2 = oppChartRef.value.querySelector('canvas');
-  if (!canvas1 || !canvas2) return;
+  // 获取原图表实例
+  const actChart = echarts.getInstanceByDom(actChartRef.value);
+  const oppChart = echarts.getInstanceByDom(oppChartRef.value);
+  if (!actChart || !oppChart) return;
 
-  const combinedCanvas = document.createElement('canvas');
-  const ctx = combinedCanvas.getContext('2d');
-  combinedCanvas.width = canvas1.width + canvas2.width;
-  combinedCanvas.height = Math.max(canvas1.height, canvas2.height);
-  
-  ctx.fillStyle = '#FFFFFF';
-  ctx.fillRect(0, 0, combinedCanvas.width, combinedCanvas.height);
-  ctx.drawImage(canvas1, 0, 0);
-  ctx.drawImage(canvas2, canvas1.width, 0);
+  // 1. 创建隐藏的 1600x800 高清画板
+  const hiddenDiv = document.createElement('div');
+  hiddenDiv.style.width = '1600px';
+  hiddenDiv.style.height = '800px';
+  hiddenDiv.style.position = 'absolute';
+  hiddenDiv.style.left = '-9999px';
+  hiddenDiv.style.visibility = 'hidden';
+  document.body.appendChild(hiddenDiv);
 
-  const link = document.createElement('a');
-  link.download = `任务与机会工时分析_${new Date().toISOString().split('T')[0]}.png`;
-  link.href = combinedCanvas.toDataURL('image/png');
-  link.click();
+  // 2. 初始化临时大尺寸图表
+  const tempChart = echarts.init(hiddenDiv);
+
+  // 3. 提取原有数据
+  const actData = actChart.getOption().series[0].data || [];
+  const oppData = oppChart.getOption().series[0].data || [];
+
+  // 4. 神奇的 ECharts 魔法：组合为一个全新的双饼图配置
+  tempChart.setOption({
+    animation: false,
+    backgroundColor: '#ffffff',
+    title: [
+      { text: '🎯 任务类型占比', left: '25%', top: '10%', textAlign: 'center', textStyle: { fontSize: 26, color: '#333' } },
+      { text: '💡 业务机会分布', left: '75%', top: '10%', textAlign: 'center', textStyle: { fontSize: 26, color: '#333' } }
+    ],
+    series: [
+      {
+        type: 'pie',
+        radius: ['40%', '65%'],
+        center: ['25%', '55%'], // 把任务类型画在左半边
+        data: actData,
+        label: { show: true, formatter: '{b}\n{d}%', fontSize: 18 }
+      },
+      {
+        type: 'pie',
+        radius: ['40%', '65%'],
+        center: ['75%', '55%'], // 把业务机会画在右半边
+        data: oppData,
+        label: { show: true, formatter: '{b}\n{d}%', fontSize: 18 }
+      }
+    ]
+  });
+
+  // 5. 等待渲染完成，触发完美尺寸的高清下载
+  setTimeout(() => {
+    const url = tempChart.getDataURL({ type: 'png', pixelRatio: 1, backgroundColor: '#fff' });
+    const link = document.createElement('a');
+    link.download = `任务与机会工时分析_${new Date().toISOString().split('T')[0]}.png`;
+    link.href = url;
+    link.click();
+
+    // 6. 清理内存和 DOM
+    tempChart.dispose();
+    document.body.removeChild(hiddenDiv);
+  }, 500);
 }
 
 const handleResize = () => charts.forEach(c => c.resize())
